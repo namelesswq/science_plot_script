@@ -190,6 +190,40 @@ python qe_plot/plot_qe_phonon_dos_pdos.py \
 - 为保持单位一致，默认会对 DOS/PDOS 做雅可比缩放：`g(THz) = g(cm^-1) * 33.35641`（可用 `--no-jacobian` 关闭）
 - `--group atom` 时可用 `--atoms 1,2,5-8` 选原子；两种分组都可用 `--elements Zr,S` 过滤
 
+---
+
+## 6) `qe_plot/plot_qe_phonon_bands_with_dos.py`
+
+用途：一张图同时画“声子谱 + 声子 DOS/PDOS”（布局与电子 `plot_qe_bands_with_pdos.py` 类似）。
+
+输入文件：
+- 声子谱：`*.freq.gp` + `matdyn.in` +（可选）`KPATH.in`
+- DOS/PDOS：`*.dos` + `scf.in`
+
+示例（左：声子谱；右：按元素求和的 PDOS，单位 THz）：
+
+```bash
+python qe_plot/plot_qe_phonon_bands_with_dos.py \
+  --freq zr2sc.freq.gp \
+  --matdyn-in matdyn.in \
+  --kpath KPATH.in \
+  --dos zr2sc.dos \
+  --scf-in scf.in \
+  --group element \
+  --unit THz \
+  --ylim 0,8 \
+  --lw 0.6 \
+  --figsize-bands 7,3 \
+  --figsize-dos 2,3 \
+  --out phonon_bands_dos.png
+```
+
+说明：
+- 默认会压缩断点处的 x 轴跳跃空白；如需保留跳跃，用 `--keep-jumps`
+- 默认 `--unit THz`：频率 `cm^-1 → THz`（除以 `33.35641`）
+- 为保持单位一致，默认会对 DOS/PDOS 做雅可比缩放：`g(THz) = g(cm^-1) * 33.35641`（可用 `--no-jacobian` 关闭）
+- 右侧 DOS 面板与左侧共享频率 y 轴（DOS 在 x，频率在 y）
+
 # Perturbo 绘图（perturbo_plot）
 
 说明：meanfp 系列脚本读取 Perturbo 的 `*_meanfp.yml`。
