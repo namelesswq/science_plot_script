@@ -164,6 +164,32 @@ python qe_plot/plot_qe_phonon_bands.py \
 
 ---
 
+## 5) `qe_plot/plot_qe_phonon_dos_pdos.py`
+
+用途：绘制声子总 DOS + PDOS（每原子一列），并可选择按元素求和。
+
+输入文件：
+- `*.dos`：第一列频率（cm^-1），第二列总 DOS，后面每一列是每个原子的 PDOS
+- `scf.in`：用于解析 `ATOMIC_POSITIONS` 的原子顺序，从而给 PDOS 列贴标签/按元素求和
+
+示例（按元素求和，单位 THz，y 轴单位为 `states/THz/unit cell`）：
+
+```bash
+python qe_plot/plot_qe_phonon_dos_pdos.py \
+  --dos zr2sc.dos \
+  --scf-in scf.in \
+  --group element \
+  --xlim 0,17.2 \
+  --lw 0.6 \
+  --figsize 6,3 \
+  --out phonon_dos.png
+```
+
+说明：
+- 默认 `--unit THz`：横轴 `cm^-1 → THz`（除以 `33.35641`）
+- 为保持单位一致，默认会对 DOS/PDOS 做雅可比缩放：`g(THz) = g(cm^-1) * 33.35641`（可用 `--no-jacobian` 关闭）
+- `--group atom` 时可用 `--atoms 1,2,5-8` 选原子；两种分组都可用 `--elements Zr,S` 过滤
+
 # Perturbo 绘图（perturbo_plot）
 
 说明：meanfp 系列脚本读取 Perturbo 的 `*_meanfp.yml`。
