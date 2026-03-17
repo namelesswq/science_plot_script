@@ -88,6 +88,7 @@ python qe_plot/plot_qe_bands.py \
   --fermi 14.776 \
   --fermi-line \
   --ylim -5,5 \
+  --lw 0.6 \
   --out bands.png
 ```
 

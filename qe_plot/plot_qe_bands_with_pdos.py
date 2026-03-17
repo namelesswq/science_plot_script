@@ -572,6 +572,108 @@ def _load_pdos_groups(
     return energy_ref, series, labels
 
 
+def _find_overlapping_xticklabels(fig: plt.Figure, ax: plt.Axes) -> List[int]:
+    """Return indices (in ax.get_xticklabels() order) that overlap with neighbors."""
+
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+
+    ticks = ax.get_xticklabels()
+    bboxes: List[Optional[object]] = []
+    for t in ticks:
+        if not t.get_visible() or not t.get_text():
+            bboxes.append(None)
+            continue
+        bboxes.append(t.get_window_extent(renderer=renderer))
+
+    bad: set[int] = set()
+    for i in range(len(ticks) - 1):
+        a = bboxes[i]
+        b = bboxes[i + 1]
+        if a is None or b is None:
+            continue
+        if a.overlaps(b):
+            bad.add(i)
+            bad.add(i + 1)
+    return sorted(bad)
+
+
+def _fix_dense_xticklabels(fig: plt.Figure, ax: plt.Axes) -> None:
+    """If x tick labels overlap, rotate/shrink them to avoid collisions."""
+    ticks = ax.get_xticklabels()
+    bad = _find_overlapping_xticklabels(fig, ax)
+    if not bad:
+        return
+
+    # Keep non-overlapping labels unchanged.
+    bad_ticks = [ticks[i] for i in bad if 0 <= i < len(ticks)]
+    bad_ticks = [t for t in bad_ticks if t.get_visible() and t.get_text()]
+    if not bad_ticks:
+        return
+
+    # Remember original texts so we can try newline staggering later.
+    orig_text: Dict[int, str] = {}
+    for i in bad:
+        if 0 <= i < len(ticks):
+            orig_text[i] = ticks[i].get_text()
+
+    base_fs = float(bad_ticks[0].get_fontsize())
+
+    # 1) Try shrinking only the overlapping labels (no rotation).
+    for scale in (0.95, 0.9, 0.85, 0.8):
+        for t in bad_ticks:
+            t.set_fontsize(base_fs * scale)
+        fig.tight_layout()
+        if not _find_overlapping_xticklabels(fig, ax):
+            return
+
+    # 2) Rotate only the overlapping labels (max 45°; do NOT rotate to 90°).
+    for t in bad_ticks:
+        t.set_rotation(45)
+        t.set_ha("right")
+        t.set_rotation_mode("anchor")
+    fig.tight_layout()
+    if not _find_overlapping_xticklabels(fig, ax):
+        return
+
+    # 3) Still overlapping: shrink the overlapping labels further (keep 45°).
+    for scale in (0.75, 0.7, 0.65):
+        for t in bad_ticks:
+            t.set_fontsize(base_fs * scale)
+        fig.tight_layout()
+        if not _find_overlapping_xticklabels(fig, ax):
+            return
+
+    # 4) Last resort: stagger only the overlapping labels into two rows via leading newlines.
+    #    This keeps non-overlapping labels untouched.
+    #    Try with 0° first (often looks cleaner), then 45° if needed.
+    for t in bad_ticks:
+        t.set_rotation(0)
+        t.set_ha("center")
+        t.set_rotation_mode("default")
+        t.set_fontsize(base_fs * 0.8)
+
+    for j, i in enumerate(bad):
+        if i not in orig_text:
+            continue
+        txt = orig_text[i]
+        if j % 2 == 1:
+            ticks[i].set_text("\n" + txt)
+        else:
+            ticks[i].set_text(txt)
+
+    fig.tight_layout()
+    if not _find_overlapping_xticklabels(fig, ax):
+        return
+
+    # If still overlapping, combine staggering with 45° for the overlapping labels only.
+    for t in bad_ticks:
+        t.set_rotation(45)
+        t.set_ha("right")
+        t.set_rotation_mode("anchor")
+    fig.tight_layout()
+
+
 def main() -> None:
     args = _build_parser().parse_args()
 
@@ -809,6 +911,9 @@ def main() -> None:
         leg = ax_dos.legend(loc=leg_loc, frameon=False, fontsize=float(leg_fs))
 
     # Tight layout and save
+    fig.tight_layout()
+    # If high-symmetry ticks are dense, auto-fix label overlap.
+    _fix_dense_xticklabels(fig, ax_band)
     fig.tight_layout()
     fig.savefig(args.out, dpi=300)
 

@@ -54,7 +54,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--figsize",
         default=None,
-        help='Figure size "width,height" in inches. If omitted, use style default.',
+        help=(
+            'Figure size in inches. Use "width,height" (e.g. "7,3"). '
+            'You may also pass a single number "width" (e.g. "7"), '
+            'in which case height is set automatically (height=0.45*width).'
+        ),
+    )
+    p.add_argument(
+        "--lw",
+        type=float,
+        default=None,
+        help=(
+            "Line width for band lines. If omitted, keep style defaults "
+            "(currently ~1.0 for prb and larger for default)."
+        ),
     )
     p.add_argument("--out", default="bands.png", help="Output image path")
     p.add_argument("--show", action="store_true", help="Show interactively")
@@ -74,9 +87,15 @@ def _parse_lim(s: Optional[str]) -> Optional[Tuple[float, float]]:
 def _parse_figsize(s: Optional[str]) -> Optional[Tuple[float, float]]:
     if not s:
         return None
-    a, b = s.split(",", 1)
-    w = float(a)
-    h = float(b)
+    s2 = s.strip()
+    if "," in s2:
+        a, b = s2.split(",", 1)
+        w = float(a)
+        h = float(b)
+    else:
+        # Allow passing only width; choose a reasonable default aspect.
+        w = float(s2)
+        h = 0.45 * w
     if w <= 0 or h <= 0:
         raise SystemExit(f"Invalid --figsize {s!r}: width and height must be > 0")
     return w, h
@@ -380,6 +399,109 @@ def _build_ticks_and_labels(
     return xticks2, xlabels2
 
 
+def _find_overlapping_xticklabels(fig: plt.Figure, ax: plt.Axes) -> List[int]:
+    """Return indices (in ax.get_xticklabels() order) that overlap with neighbors."""
+
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+
+    ticks = ax.get_xticklabels()
+    bboxes: List[Optional[object]] = []
+    for t in ticks:
+        if not t.get_visible() or not t.get_text():
+            bboxes.append(None)
+            continue
+        bboxes.append(t.get_window_extent(renderer=renderer))
+
+    bad: set[int] = set()
+    for i in range(len(ticks) - 1):
+        a = bboxes[i]
+        b = bboxes[i + 1]
+        if a is None or b is None:
+            continue
+        if a.overlaps(b):
+            bad.add(i)
+            bad.add(i + 1)
+    return sorted(bad)
+
+
+def _fix_dense_xticklabels(fig: plt.Figure, ax: plt.Axes) -> None:
+    """Fix dense high-symmetry tick labels without touching non-overlapping ones.
+
+    Strategy (in order):
+    1) shrink only overlapping labels
+    2) rotate only overlapping labels (max 45°, no 90°)
+    3) shrink further
+    4) stagger overlapping labels into two rows using leading newlines
+    """
+
+    ticks = ax.get_xticklabels()
+    bad = _find_overlapping_xticklabels(fig, ax)
+    if not bad:
+        return
+
+    bad_ticks = [ticks[i] for i in bad if 0 <= i < len(ticks)]
+    bad_ticks = [t for t in bad_ticks if t.get_visible() and t.get_text()]
+    if not bad_ticks:
+        return
+
+    orig_text: Dict[int, str] = {}
+    for i in bad:
+        if 0 <= i < len(ticks):
+            orig_text[i] = ticks[i].get_text()
+
+    base_fs = float(bad_ticks[0].get_fontsize())
+
+    # 1) Shrink only overlapping labels (no rotation).
+    for scale in (0.95, 0.9, 0.85, 0.8):
+        for t in bad_ticks:
+            t.set_fontsize(base_fs * scale)
+        fig.tight_layout()
+        if not _find_overlapping_xticklabels(fig, ax):
+            return
+
+    # 2) Rotate only overlapping labels (max 45°).
+    for t in bad_ticks:
+        t.set_rotation(45)
+        t.set_ha("right")
+        t.set_rotation_mode("anchor")
+    fig.tight_layout()
+    if not _find_overlapping_xticklabels(fig, ax):
+        return
+
+    # 3) Shrink further (keep 45°).
+    for scale in (0.75, 0.7, 0.65):
+        for t in bad_ticks:
+            t.set_fontsize(base_fs * scale)
+        fig.tight_layout()
+        if not _find_overlapping_xticklabels(fig, ax):
+            return
+
+    # 4) Stagger into two rows via leading newlines (try without rotation first).
+    for t in bad_ticks:
+        t.set_rotation(0)
+        t.set_ha("center")
+        t.set_rotation_mode("default")
+        t.set_fontsize(base_fs * 0.8)
+
+    for j, i in enumerate(bad):
+        if i not in orig_text:
+            continue
+        txt = orig_text[i]
+        ticks[i].set_text(txt if (j % 2 == 0) else ("\n" + txt))
+
+    fig.tight_layout()
+    if not _find_overlapping_xticklabels(fig, ax):
+        return
+
+    # If still overlapping, combine staggering with 45° (overlapping labels only).
+    for t in bad_ticks:
+        t.set_rotation(45)
+        t.set_ha("right")
+        t.set_rotation_mode("anchor")
+    fig.tight_layout()
+
+
 def main() -> None:
     args = _build_parser().parse_args()
 
@@ -419,6 +541,10 @@ def main() -> None:
     else:
         fig, ax = plt.subplots()
 
+    if args.lw is not None and float(args.lw) <= 0:
+        raise SystemExit("--lw must be > 0")
+    lw_band = float(args.lw) if args.lw is not None else (1.0 if args.style == "prb" else 1.4)
+
     # Energy shift
     y_arrays = bands
     if args.fermi is not None:
@@ -427,7 +553,7 @@ def main() -> None:
     # Plot each band as black solid lines, but break at jumps by plotting per-segment.
     for e in y_arrays:
         for (s, t) in segments:
-            ax.plot(x[s : t + 1], e[s : t + 1], color="black", lw=1.0 if args.style == "prb" else 1.4)
+            ax.plot(x[s : t + 1], e[s : t + 1], color="black", lw=lw_band)
 
     # High-symmetry separators and ticks
     for xpos in xticks:
@@ -458,6 +584,8 @@ def main() -> None:
         # SciencePlots sets its own typography; keep minimal tweaks.
         pass
 
+    fig.tight_layout()
+    _fix_dense_xticklabels(fig, ax)
     fig.tight_layout()
     fig.savefig(args.out, dpi=300)
     print(f"Saved: {args.out}")
