@@ -134,6 +134,36 @@ python qe_plot/plot_qe_bands_with_pdos.py \
 
 ---
 
+## 4) `qe_plot/plot_qe_phonon_bands.py`
+
+用途：绘制 Quantum ESPRESSO `matdyn.x` 的声子谱（色散关系）。
+
+输入文件：
+- `*.freq.gp`：第一列是路径坐标 x（已累计的路径距离），后面每一列是一条声子带
+- `matdyn.in`：包含 q 点路径（通常 `q_in_band_form = .true.`），每行第 4 列是该段点数 `N`；其中 `N=1` 表示跳跃/断点
+- `KPATH.in`（可选）：VASPKIT 格式高对称点名称（坐标匹配，Γ 会自动归一化为 `Γ`）
+
+示例（与你当前目录结构一致）：
+
+```bash
+python qe_plot/plot_qe_phonon_bands.py \
+  --freq zr2sc.freq.gp \
+  --matdyn-in matdyn.in \
+  --kpath KPATH.in \
+  --unit THz \
+  --ylim 0,8 \
+  --lw 0.6 \
+  --figsize 7,3 \
+  --out phonon_bands.png
+```
+
+说明：
+- 默认会把 `*.freq.gp` 里的频率从 `cm^-1` 转为 `THz`（除以 `33.35641`）；如需保留 `cm^-1` 用 `--unit cm^-1`
+- 脚本会按 `matdyn.in` 的 `N=1` 断点自动“断开连线”，并把该点刻度合并为 `A|L`
+- 高对称点标签若过密，脚本会只对“发生遮挡的少数标签”做处理（缩字号/最多 45°/两行错位），不遮挡的标签保持水平
+
+---
+
 # Perturbo 绘图（perturbo_plot）
 
 说明：meanfp 系列脚本读取 Perturbo 的 `*_meanfp.yml`。
