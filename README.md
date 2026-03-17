@@ -1,0 +1,319 @@
+# science_plot_script
+
+这是一组用于科研绘图的 Python 脚本集合，覆盖：
+- Quantum ESPRESSO：能带、DOS/PDOS（projwfc）以及“能带 + PDOS”合图
+- Perturbo：meanfp（群速度、散射率、电子 MFP）与 κ(T)（结合 ShengBTE + Perturbo）
+- ShengBTE：声子群速度散点、散射率散点、声子 MFP 散点
+
+## 依赖安装
+
+推荐使用 conda 环境（你自己的 python310 环境已验证可正常运行）。
+
+- 最小依赖（绝大多数脚本都需要）：
+
+```bash
+pip install numpy matplotlib pyyaml
+```
+
+- QE 能带/PDOS 脚本默认 `--style prb` 会使用 SciencePlots（投稿风格）：
+
+```bash
+pip install SciencePlots
+```
+
+无显示器的服务器环境建议：
+
+```bash
+export MPLBACKEND=Agg
+```
+
+## 目录结构
+
+- `qe_plot/`：Quantum ESPRESSO（能带、DOS/PDOS、合图）
+- `perturbo_plot/`：Perturbo meanfp（|v|、1/τ、MFP）+ κ(T)
+- `shengbte_plot/`：ShengBTE 声子相关散点图
+
+---
+
+# QE 绘图（qe_plot）
+
+## 1) `qe_plot/plot_qe_dos_pdos_overlay.py`
+
+用途：在一张图里叠加绘制总 DOS + 按元素/轨道（可选按 wfc# 区分）的 PDOS。
+
+输入文件：
+- 总 DOS：`<prefix>.pdos.pdos_tot`
+- PDOS：`<prefix>.pdos.pdos_atm#N(El)_wfc#M(orb)`（projwfc 输出）
+
+最常用示例（自动从 `--tot` 推断并 glob PDOS）：
+
+```bash
+python qe_plot/plot_qe_dos_pdos_overlay.py \
+  --tot zr2sc.pdos.pdos_tot \
+  --elements Zr,S,C \
+  --orbitals s,p,d \
+  --merge-wfc \
+  --fermi 14.776 \
+  --fermi-line \
+  --xlim -5,5 \
+  --out dos_pdos.png
+```
+
+常用参数：
+- `--pdos`：显式给出 PDOS 文件列表（不常用，文件太多时可用）
+- `--pdos-glob`：自定义 glob 模式（覆盖自动推断）
+- `--merge-wfc`：将同一元素同一轨道的不同 `wfc#` 合并为一条曲线
+- `--n0 'Zr=4,S=3,C=2'`：不合并 wfc 时，把 `wfc#` 重新标成“主量子数标签”（如 Zr-4d、Zr-5d…）
+- `--tot-col` / `--pdos-col`：指定读哪一列（0-based；默认都取第 2 列即 `col=1`）
+- `--style prb|default`、`--figsize 3.4,2.6`、`--ylog`、`--sci-y auto|on|off`
+
+---
+
+## 2) `qe_plot/plot_qe_bands.py`
+
+用途：从 `bands.out.gnu` 画能带，并结合 `band.in` 与 `KPATH.in` 标注高对称点。
+
+输入文件：
+- `bands.out.gnu`：两列（k 距离、能量），空行分隔不同 band
+- `band.in`：QE 输入，包含 `K_POINTS crystal_b`，每个 k 点行第 4 列为该段点数 `N`；其中 `N=1` 代表“跳跃/断点”
+- `KPATH.in`（可选）：VASPKIT 格式的高对称点标签
+
+示例：
+
+```bash
+python qe_plot/plot_qe_bands.py \
+  --bands bands.out.gnu \
+  --band-in band.in \
+  --kpath KPATH.in \
+  --fermi 14.776 \
+  --fermi-line \
+  --ylim -5,5 \
+  --out bands.png
+```
+
+说明：
+- 当 `band.in` 中某行 `N=1` 时，该位置视作不连续点：刻度标签会被合并成 `A|L`（终点|起点），且能带不会跨越该点连线。
+
+---
+
+## 3) `qe_plot/plot_qe_bands_with_pdos.py`
+
+用途：一张图同时画“能带 + PDOS”。右侧 PDOS 面板会旋转 90°（DOS 在 x，能量在共享 y）。
+
+输入文件：
+- 能带：`bands.out.gnu`、`band.in`、（可选）`KPATH.in`
+- DOS/PDOS：同 `plot_qe_dos_pdos_overlay.py`（`--tot` + 自动 glob PDOS）
+
+最常用示例（你此前常用的排版参数）：
+
+```bash
+python qe_plot/plot_qe_bands_with_pdos.py \
+  --bands bands.out.gnu \
+  --band-in band.in \
+  --kpath KPATH.in \
+  --tot zr2sc.pdos.pdos_tot \
+  --elements Zr,S,C \
+  --orbitals s,p,d \
+  --merge-wfc \
+  --fermi 14.776 \
+  --fermi-line \
+  --ylim -5,5 \
+  --figsize-bands 7,3 \
+  --figsize-dos 1.5,3 \
+  --legend-fontsize 7 \
+  --legend-loc best \
+  --lw 0.6 \
+  --out bands_pdos.png
+```
+
+常用参数：
+- `--dos-xlim xmin,xmax`：限制右侧 DOS 轴范围
+- `--ratios 3,1`：面板宽度比（若没用 `--figsize-bands/--figsize-dos`，可用这个快速调比例）
+- `--n0`、`--tot-col`、`--pdos-col`：同上
+
+---
+
+# Perturbo 绘图（perturbo_plot）
+
+说明：meanfp 系列脚本读取 Perturbo 的 `*_meanfp.yml`。
+
+通用参数要点：
+- `--x energy|e_minus_mu`：横轴用 $E$ 或 $E-\mu$（默认 `e_minus_mu`）
+- `--mode scatter|binned`：散点或分箱曲线
+- `--bands "1-6"` / `"1,3,5"`：选带（YAML 内的 band index）
+- `--xlim a,b`、`--ylim a,b`
+- `--sci-y auto|on|off`：纵轴科学计数法“×10^n”
+
+## 1) `perturbo_plot/plot_group_velocity.py`
+
+用途：画电子群速度 $|v|$。
+
+示例（多文件对比 + 散点）：
+
+```bash
+python perturbo_plot/plot_group_velocity.py \
+  zr2sc_meanfp.yml zr2sc_defect_meanfp.yml \
+  --labels pristine,defect \
+  --bands 1-6 \
+  --x e_minus_mu \
+  --mode scatter \
+  --alpha 0.15 --s 4 \
+  --xlim -1,1 \
+  --out v_scatter.png
+```
+
+示例（分箱曲线）：
+
+```bash
+python perturbo_plot/plot_group_velocity.py \
+  zr2sc_meanfp.yml \
+  --mode binned \
+  --bin-width 0.02 \
+  --reducer median \
+  --out v_binned.png
+```
+
+---
+
+## 2) `perturbo_plot/plot_scattering_rate.py`
+
+用途：画电子散射率 $1/\tau$（由 `relaxation time` 取倒数得到）。
+
+示例：
+
+```bash
+python perturbo_plot/plot_scattering_rate.py \
+  zr2sc_meanfp.yml \
+  --config 1 \
+  --unit ps^-1 \
+  --mode scatter \
+  --ylog \
+  --xlim -1,1 \
+  --out rate.png
+```
+
+---
+
+## 3) `perturbo_plot/plot_mean_free_path.py`
+
+用途：画电子平均自由程（MFP，nm）。
+
+示例：
+
+```bash
+python perturbo_plot/plot_mean_free_path.py \
+  zr2sc_meanfp.yml \
+  --config 1 \
+  --mode scatter \
+  --ylog \
+  --xlim -1,1 \
+  --out mfp.png
+```
+
+---
+
+## 4) `perturbo_plot/plot_kappa_vs_temperature.py`
+
+用途：在一张图里同时画：
+- `κ_latt(T)`：来自 ShengBTE `BTE.KappaTensorVsT_CONV`
+- `κ_el(T)`：来自 Perturbo `*_trans-ita.yml`
+- `κ_total(T)=κ_latt+κ_el`
+
+重要约束：温度网格必须完全一致；脚本不会插值，不一致会直接报错。
+
+单组数据示例：
+
+```bash
+python perturbo_plot/plot_kappa_vs_temperature.py \
+  --set Zr2SC BTE.KappaTensorVsT_CONV zr2sc_trans-ita.yml \
+  --component avg \
+  --out kappa_vs_T.png
+```
+
+多组对比示例（重复 `--set`）：
+
+```bash
+python perturbo_plot/plot_kappa_vs_temperature.py \
+  --set pristine BTE.KappaTensorVsT_CONV zr2sc_trans-ita.yml \
+  --set defect   defect/BTE.KappaTensorVsT_CONV defect/zr2sc_trans-ita.yml \
+  --component xx \
+  --xlim 200,800 \
+  --out kappa_compare.png
+```
+
+---
+
+## 5) `perturbo_plot/perturbo_meanfp_io.py`
+
+这是 meanfp 系列脚本共用的 I/O 与绘图工具模块（读取 YAML、分箱统计、统一粗体/科学计数法样式等），一般不需要直接运行。
+
+---
+
+# ShengBTE 绘图（shengbte_plot）
+
+## 1) `shengbte_plot/plot_phonon_mfp.py`
+
+用途：从 ShengBTE 输出画声子 MFP 散点图。
+
+默认物理单位假设：
+- `BTE.omega`：`rad/ps`
+- `BTE.v`：`km/s`（可用 `--v-unit m/s`）
+- `BTE.w_*`：`ps^-1`
+
+则 $\mathrm{MFP} (\mathrm{nm}) = |v|/w$。
+
+示例（同一套 `BTE.omega` + `BTE.v`，对比多种散射率文件）：
+
+```bash
+python shengbte_plot/plot_phonon_mfp.py \
+  --omega BTE.omega \
+  --v BTE.v \
+  BTE.w_isotopic T300K/BTE.w_final \
+  --labels isotopic,3ph \
+  --ylog \
+  --xlim 0,25 \
+  --out phonon_mfp.png
+```
+
+常用参数：
+- `--x omega|wfile`：x 轴频率取 `BTE.omega` 或取每个 w 文件的第一列
+- `--xlog/--ylog`、`--xlim/--ylim`、`--alpha/--s`
+
+---
+
+## 2) `shengbte_plot/plot_phonon_v.py`
+
+用途：画声子群速度 $|v|$ vs 频率散点图。
+
+这是一个“配置区写死参数”的脚本（没有命令行参数）：
+- 默认读 `BTE.omega` 与 `BTE.v`
+- 输出 `phonon_velocity_scatter.png`
+- 脚本顶部的“配置区域”可改：输入文件名、点大小、透明度、颜色等
+
+运行：
+
+```bash
+python shengbte_plot/plot_phonon_v.py
+```
+
+服务器上不想弹窗：把脚本末尾的 `plt.show()` 保持注释状态（当前脚本默认就是注释）。
+
+---
+
+## 3) `shengbte_plot/plot_lattice_scatter.py`
+
+用途：画晶格散射率散点图（支持把多个 `BTE.w_*` 文件画在同一张图里，并给不同 legend）。
+
+同样是“配置区写死参数”的脚本（没有命令行参数）：
+- 在脚本顶部 `files_and_labels = {...}` 里添加/修改文件路径与图例名
+- 可以在顶部设置：`use_log_scale_x/y`、`ylim`、点大小与透明度等
+
+运行：
+
+```bash
+python shengbte_plot/plot_lattice_scatter.py
+```
+
+注意：该脚本默认会 `plt.show()`，若在无显示环境运行：
+- 设 `export MPLBACKEND=Agg` 或
+- 注释掉 `plt.show()`
