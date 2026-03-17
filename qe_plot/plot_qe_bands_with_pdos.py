@@ -898,7 +898,7 @@ def main() -> None:
             xmax = max(xmax, float(np.nanmax(series[lab][mask_p])))
         ax_dos.set_xlim(0.0, xmax * 1.05 if xmax > 0 else 1.0)
 
-    # Labels: only left y-label; PDOS panel hides x ticks but keeps a compact xlabel
+    # Labels: keep compact xlabel on PDOS panel and show x-axis tick values
     ax_band.set_ylabel(r"$E - E_{f}$ (eV)" if args.fermi is not None else "Energy (eV)")
 
     ax_dos.set_xlabel("Electron DOS\n(states/eV/unit cell)")
@@ -907,8 +907,7 @@ def main() -> None:
         ax_dos.xaxis.label.set_fontsize(base * 0.85)
     except Exception:
         pass
-    ax_dos.set_xticks([])
-    ax_dos.tick_params(axis="x", which="both", bottom=False, top=False, labelbottom=False)
+    ax_dos.tick_params(axis="x", which="both", bottom=True, top=False, labelbottom=True)
 
     # Hide duplicate y tick labels on the right
     ax_dos.tick_params(axis="y", which="both", left=False, labelleft=False)

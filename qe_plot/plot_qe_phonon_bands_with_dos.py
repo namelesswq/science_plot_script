@@ -808,7 +808,7 @@ def main() -> None:
     # Hide duplicate y tick labels on the right
     ax_dos.tick_params(axis="y", which="both", left=False, labelleft=False)
 
-    # Keep DOS panel minimal (like the electronic combined script)
+    # Keep DOS panel compact but show x-axis tick values
     if args.unit == "THz":
         ax_dos.set_xlabel("Phonon DOS\n(states/THz/unit cell)")
     else:
@@ -817,8 +817,7 @@ def main() -> None:
         ax_dos.xaxis.label.set_fontsize(ax_band.xaxis.label.get_size() * 0.85)
     except Exception:
         pass
-    ax_dos.set_xticks([])
-    ax_dos.tick_params(axis="x", which="both", bottom=False, top=False, labelbottom=False)
+    ax_dos.tick_params(axis="x", which="both", bottom=True, top=False, labelbottom=True)
 
     leg_fs = args.legend_fontsize
     if leg_fs is None:
