@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.lines import Line2D
 
 
 _CM1_PER_THz = 33.35641  # THz = (cm^-1)/33.35641
@@ -161,6 +162,29 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--show", action="store_true", help="Show interactively")
     p.add_argument("--no-bold", action="store_true", help="Disable bold text in default style")
 
+    p.add_argument(
+        "--system",
+        default=None,
+        help="System label shown as a small legend entry on the bands panel (e.g. 'Zr2SeC').",
+    )
+    p.add_argument(
+        "--system-format",
+        choices=["chem", "raw"],
+        default="chem",
+        help="Render --system as chemical formula with subscripts (chem) or raw text (raw). Default: chem.",
+    )
+    p.add_argument(
+        "--system-fontsize",
+        type=float,
+        default=None,
+        help="Font size for --system legend text. If omitted, uses an automatic larger size.",
+    )
+    p.add_argument(
+        "--system-loc",
+        default="upper left",
+        help="Legend location for --system (matplotlib legend loc). Default: upper left.",
+    )
+
     return p
 
 
@@ -211,6 +235,16 @@ def _apply_bold(ax, *, bold: bool) -> None:
     ax.yaxis.label.set_fontweight("bold")
     for t in list(ax.get_xticklabels()) + list(ax.get_yticklabels()):
         t.set_fontweight("bold")
+
+
+def _format_system_label(label: str, mode: str) -> str:
+    if not label:
+        return label
+    if mode == "raw":
+        return label
+    if "$" in label:
+        return label
+    return re.sub(r"(?<=[A-Za-z\)])(\d+)", r"$_{\1}$", label)
 
 
 def _read_freq_gp(path: str) -> Tuple[np.ndarray, np.ndarray]:
@@ -767,6 +801,30 @@ def main() -> None:
 
     ax_band.set_xticks(xticks)
     ax_band.set_xticklabels(xticklabels)
+    # Keep only high-symmetry vertical lines on x-axis; hide tick marks (but keep labels).
+    ax_band.tick_params(axis="x", which="both", bottom=False, top=False, length=0)
+
+    if args.system:
+        sys_lab = _format_system_label(str(args.system), str(args.system_format))
+        h = Line2D([], [], color="none", label=sys_lab)
+        fs = args.system_fontsize
+        if fs is None:
+            try:
+                fs = float(ax_band.yaxis.label.get_size()) * 1.15
+            except Exception:
+                fs = None
+        leg_sys = ax_band.legend(
+            handles=[h],
+            loc=str(args.system_loc),
+            frameon=False,
+            handlelength=0,
+            handletextpad=0.0,
+            borderaxespad=0.2,
+            fontsize=fs,
+        )
+        if leg_sys is not None:
+            for t in leg_sys.get_texts():
+                t.set_fontweight("bold")
 
     ax_band.set_xlim(float(x_plot[0]), float(x_plot[-1]))
     if ylim:
@@ -776,7 +834,7 @@ def main() -> None:
     ax_band.set_ylabel(ylab)
 
     # --- Plot rotated DOS/PDOS (x = DOS, y = Frequency) ---
-    ax_dos.plot(dos_tot, freq_dos, color="black", lw=lw, label="Total DOS")
+    ax_dos.plot(dos_tot, freq_dos, color="black", lw=lw, label="Total")
 
     color_cycle = [
         "tab:red",

@@ -88,12 +88,16 @@ python qe_plot/plot_qe_bands.py \
   --fermi 14.776 \
   --fermi-line \
   --ylim -5,5 \
+  --system Zr2SC \
+  --system-fontsize 14 \
   --lw 0.6 \
   --out bands.png
 ```
 
 说明：
 - 当 `band.in` 中某行 `N=1` 时，该位置视作不连续点：刻度标签会被合并成 `A|L`（终点|起点），且能带不会跨越该点连线。
+- x 轴只保留高对称点处的竖线（`axvline`），不再显示刻度短线；高对称点标签仍会显示。
+- 可用 `--system` 在左上角等位置标注体系名称（默认会把化学式中的数字渲染为下标，如 `Zr2SC → Zr$_{2}$SC`）；若不想下标，用 `--system-format raw`。
 
 ---
 
@@ -123,6 +127,8 @@ python qe_plot/plot_qe_bands_with_pdos.py \
   --figsize-dos 1.5,3 \
   --legend-fontsize 7 \
   --legend-loc best \
+  --system Zr2SC \
+  --system-fontsize 14 \
   --lw 0.6 \
   --out bands_pdos.png
 ```
@@ -131,6 +137,7 @@ python qe_plot/plot_qe_bands_with_pdos.py \
 - `--dos-xlim xmin,xmax`：限制右侧 DOS 轴范围
 - `--ratios 3,1`：面板宽度比（若没用 `--figsize-bands/--figsize-dos`，可用这个快速调比例）
 - `--n0`、`--tot-col`、`--pdos-col`：同上
+- `--system` / `--system-format chem|raw` / `--system-fontsize` / `--system-loc`：在左侧能带面板用图例样式标注体系（默认 `chem` 会把化学式数字变下标）
 
 ---
 
@@ -152,6 +159,8 @@ python qe_plot/plot_qe_phonon_bands.py \
   --kpath KPATH.in \
   --unit THz \
   --ylim 0,8 \
+  --system Zr2SC \
+  --system-fontsize 14 \
   --lw 0.6 \
   --figsize 7,3 \
   --out phonon_bands.png
@@ -161,6 +170,8 @@ python qe_plot/plot_qe_phonon_bands.py \
 - 默认会把 `*.freq.gp` 里的频率从 `cm^-1` 转为 `THz`（除以 `33.35641`）；如需保留 `cm^-1` 用 `--unit cm^-1`
 - 脚本会按 `matdyn.in` 的 `N=1` 断点自动“断开连线”，并把该点刻度合并为 `A|L`
 - 高对称点标签若过密，脚本会只对“发生遮挡的少数标签”做处理（缩字号/最多 45°/两行错位），不遮挡的标签保持水平
+- x 轴只保留高对称点处的竖线（`axvline`），不再显示刻度短线；高对称点标签仍会显示。
+- 可用 `--system` 标注体系名称（默认会把化学式数字渲染为下标；不想下标用 `--system-format raw`）。
 
 ---
 
@@ -212,6 +223,8 @@ python qe_plot/plot_qe_phonon_bands_with_dos.py \
   --group element \
   --unit THz \
   --ylim 0,8 \
+  --system Zr2SC \
+  --system-fontsize 14 \
   --lw 0.6 \
   --figsize-bands 7,3 \
   --figsize-dos 2,3 \
@@ -223,6 +236,8 @@ python qe_plot/plot_qe_phonon_bands_with_dos.py \
 - 默认 `--unit THz`：频率 `cm^-1 → THz`（除以 `33.35641`）
 - 为保持单位一致，默认会对 DOS/PDOS 做雅可比缩放：`g(THz) = g(cm^-1) * 33.35641`（可用 `--no-jacobian` 关闭）
 - 右侧 DOS 面板与左侧共享频率 y 轴（DOS 在 x，频率在 y）
+- 左侧声子谱 x 轴只保留高对称点处的竖线，不再显示刻度短线；高对称点标签仍会显示。
+- `--system` / `--system-format chem|raw` / `--system-fontsize` / `--system-loc`：在左侧面板标注体系（默认 `chem` 下标渲染）。
 
 # Perturbo 绘图（perturbo_plot）
 

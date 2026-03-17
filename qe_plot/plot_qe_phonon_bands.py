@@ -9,12 +9,23 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.lines import Line2D
 
 
 @dataclass(frozen=True)
 class KPointSpec:
     q: Tuple[float, float, float]
     n: int  # number of points from this q-point to the next; n==1 means a jump/break
+
+
+def _format_system_label(label: str, mode: str) -> str:
+    if not label:
+        return label
+    if mode == "raw":
+        return label
+    if "$" in label:
+        return label
+    return re.sub(r"(?<=[A-Za-z\)])(\d+)", r"$_{\1}$", label)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -77,6 +88,29 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default="phonon_bands.png", help="Output image path")
     p.add_argument("--show", action="store_true", help="Show interactively")
     p.add_argument("--no-bold", action="store_true", help="Disable bold text in default style")
+
+    p.add_argument(
+        "--system",
+        default=None,
+        help="System label shown as a small legend entry (e.g. 'Zr2SeC').",
+    )
+    p.add_argument(
+        "--system-format",
+        choices=["chem", "raw"],
+        default="chem",
+        help="Render --system as chemical formula with subscripts (chem) or raw text (raw). Default: chem.",
+    )
+    p.add_argument(
+        "--system-fontsize",
+        type=float,
+        default=None,
+        help="Font size for --system legend text. If omitted, uses an automatic larger size.",
+    )
+    p.add_argument(
+        "--system-loc",
+        default="upper left",
+        help="Legend location for --system (matplotlib legend loc). Default: upper left.",
+    )
 
     return p
 
@@ -526,6 +560,30 @@ def main() -> None:
 
     ax.set_xticks(xticks)
     ax.set_xticklabels(xticklabels)
+    # Keep only high-symmetry vertical lines on x-axis; hide tick marks (but keep labels).
+    ax.tick_params(axis="x", which="both", bottom=False, top=False, length=0)
+
+    if args.system:
+        sys_lab = _format_system_label(str(args.system), str(args.system_format))
+        h = Line2D([], [], color="none", label=sys_lab)
+        fs = args.system_fontsize
+        if fs is None:
+            try:
+                fs = float(ax.yaxis.label.get_size()) * 1.15
+            except Exception:
+                fs = None
+        leg = ax.legend(
+            handles=[h],
+            loc=str(args.system_loc),
+            frameon=False,
+            handlelength=0,
+            handletextpad=0.0,
+            borderaxespad=0.2,
+            fontsize=fs,
+        )
+        if leg is not None:
+            for t in leg.get_texts():
+                t.set_fontweight("bold")
 
     ax.set_xlim(float(x_plot[0]), float(x_plot[-1]))
     if ylim:
