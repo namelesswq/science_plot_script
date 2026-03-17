@@ -384,34 +384,40 @@ def _find_label_for_k(
 
 
 def _infer_indices(specs: Sequence[KPointSpec], n_data: int) -> Tuple[List[int], str]:
-    def build(overlap: bool) -> List[int]:
+    def build(*, overlap: bool, break_advances: bool) -> List[int]:
         idx = 0
         out = [0]
         for i in range(len(specs) - 1):
             n = int(specs[i].n)
             if n <= 1:
+                if break_advances:
+                    idx += 1
                 out.append(idx)
                 continue
             idx += (n - 1) if overlap else n
             out.append(idx)
         return out
 
-    ind1 = build(overlap=True)
-    ind2 = build(overlap=False)
+    # Try 4 conventions:
+    # - overlap vs no-overlap for N
+    # - whether a discontinuity (N=1) advances by one data point (QE often outputs an extra point)
+    candidates: List[Tuple[str, List[int]]] = []
+    candidates.append(("overlap+break", build(overlap=True, break_advances=True)))
+    candidates.append(("no-overlap+break", build(overlap=False, break_advances=True)))
+    candidates.append(("overlap", build(overlap=True, break_advances=False)))
+    candidates.append(("no-overlap", build(overlap=False, break_advances=False)))
 
-    len1 = ind1[-1] + 1
-    len2 = ind2[-1] + 1
+    exact = [(name, ind) for (name, ind) in candidates if (ind[-1] + 1) == n_data]
+    if exact:
+        return exact[0][1], exact[0][0]
 
-    if len1 == n_data and len2 != n_data:
-        return ind1, "overlap"
-    if len2 == n_data and len1 != n_data:
-        return ind2, "no-overlap"
-    if len1 == n_data and len2 == n_data:
-        return ind1, "overlap"
-
-    if abs(len1 - n_data) <= abs(len2 - n_data):
-        return ind1, "overlap*"
-    return ind2, "no-overlap*"
+    best_name, best_ind = candidates[0]
+    best_err = abs((best_ind[-1] + 1) - n_data)
+    for name, ind in candidates[1:]:
+        err = abs((ind[-1] + 1) - n_data)
+        if err < best_err:
+            best_name, best_ind, best_err = name, ind, err
+    return best_ind, best_name + "*"
 
 
 def _build_segments(specs: Sequence[KPointSpec], indices: Sequence[int]) -> List[Tuple[int, int]]:
