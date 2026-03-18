@@ -571,6 +571,67 @@ python shengbte_plot/plot_lattice_scatter.py \
 
 ---
 
+## 4) `shengbte_plot/plot_kappa_tensor_vs_temperature.py`
+
+用途：绘制 ShengBTE 的晶格热导率张量随温度变化曲线（来自 `BTE.KappaTensorVsT_CONV`），并支持多组数据叠加对比。
+
+数据结构约定：
+- 第 1 列：温度 $T$（K）
+- 后 9 列：$\kappa$ 张量分量，顺序为 `xx,xy,xz,yx,yy,yz,zx,zy,zz`
+- 最后一列：不使用（脚本会忽略）
+
+单文件示例（默认 `--component avg`，即 $(\kappa_{xx}+\kappa_{yy}+\kappa_{zz})/3$）：
+
+```bash
+python shengbte_plot/plot_kappa_tensor_vs_temperature.py \
+  --file BTE.KappaTensorVsT_CONV \
+  --legend pristine \
+  --system Zr2SC \
+  --component avg \
+  --xlim 200,800 \
+  --out kappa_vs_T.png
+```
+
+多组对比示例：
+
+```bash
+python shengbte_plot/plot_kappa_tensor_vs_temperature.py \
+  --file \
+    prim/BTE.KappaTensorVsT_CONV \
+    zr_vac/BTE.KappaTensorVsT_CONV \
+    s_vac/BTE.KappaTensorVsT_CONV \
+  --legend Pristine 'V[Zr]' 'V[S]' \
+  --legend-bbox 0.18,0.95 \
+  --legend-fontsize 10 \
+  --system Zr2SC \
+  --system-bbox 0,0.75 \
+  --component xx \
+  --xlim 200,800 \
+  --out kappa_compare.png
+```
+
+常用参数：
+- `--component xx|yy|zz|xy|...|avg|trace`：选择绘制哪个分量（`avg` 为对角平均）
+- `--color ...` / `--marker ...` / `--ms ...`：为每组数据指定颜色、点样式（marker）与点大小（marker size；`--ms` 支持逐组给值或给 1 个值广播），并在 legend 中同步显示
+- 数据集图例（彩色线段）：`--legend/--legend-format/--legend-fontsize/--legend-loc/--legend-bbox`
+- 整体体系标注（纯文字，粗体）：`--system/--system-format/--system-fontsize/--system-loc/--system-bbox`
+
+示例（显式指定每组颜色与 marker）：
+
+```bash
+python shengbte_plot/plot_kappa_tensor_vs_temperature.py \
+  --file prim/BTE.KappaTensorVsT_CONV zr_vac/BTE.KappaTensorVsT_CONV s_vac/BTE.KappaTensorVsT_CONV \
+  --legend Pristine 'V[Zr]' 'V[S]' \
+  --color black tab:red tab:blue \
+  --marker o s ^ \
+  --ms 4.5 6 6 \
+  --component avg \
+  --xlim 200,700 \
+  --out kappa_compare_marker.png
+```
+
+---
+
 ## 3) `shengbte_plot/plot_lattice_scatter.py`
 
 用途：画晶格散射率散点图（支持把多个 `BTE.w_*` 文件画在同一张图里，并给不同 legend）。
