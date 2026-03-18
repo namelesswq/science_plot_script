@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
+from matplotlib.colors import to_rgb
 
 
 @dataclass(frozen=True)
@@ -48,12 +49,35 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     # Bands
-    p.add_argument("--bands", required=True, help="Path to bands.out.gnu")
-    p.add_argument("--band-in", required=True, help="Path to band.in (QE input with K_POINTS crystal_b)")
-    p.add_argument("--kpath", default=None, help="Path to KPATH.in (VASPKIT). If omitted, labels are guessed.")
+    p.add_argument(
+        "--bands",
+        required=True,
+        nargs="+",
+        help="One or more bands.out.gnu files. If multiple are given, they are overlaid for comparison.",
+    )
+    p.add_argument(
+        "--band-in",
+        required=True,
+        nargs="+",
+        help="One or more band.in files. If a single file is given, it is reused for all datasets.",
+    )
+    p.add_argument(
+        "--kpath",
+        default=None,
+        nargs="+",
+        help=(
+            "One or more KPATH.in files (VASPKIT). If omitted, labels are guessed. "
+            "If a single file is given, it is reused."
+        ),
+    )
 
     # PDOS
-    p.add_argument("--tot", required=True, help="Total DOS file, e.g. zr2sc.pdos.pdos_tot")
+    p.add_argument(
+        "--tot",
+        required=True,
+        nargs="+",
+        help="One or more total DOS files, e.g. zr2sc.pdos.pdos_tot. If multiple are given, they are overlaid.",
+    )
     p.add_argument(
         "--pdos",
         nargs="*",
@@ -63,7 +87,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--pdos-glob",
         default=None,
-        help="Glob pattern for PDOS files (overrides auto). Example: 'zr2sc.pdos.pdos_atm#*'",
+        nargs="+",
+        help=(
+            "Glob pattern(s) for PDOS files (overrides auto). Example: 'zr2sc.pdos.pdos_atm#*'. "
+            "Provide one per dataset, or a single value to broadcast. Comma-separated tokens are accepted."
+        ),
     )
     p.add_argument("--elements", default=None, help="Comma-separated element filter, e.g. 'Zr,S,C'.")
     p.add_argument(
@@ -106,11 +134,12 @@ def _build_parser() -> argparse.ArgumentParser:
     # Shared / plot
     p.add_argument(
         "--fermi",
-        type=float,
         default=None,
+        nargs="+",
         help=(
             "Fermi energy in eV. If provided, shift energies as E -> E - Ef so Ef is at 0 eV. "
-            "Applied to both bands and DOS/PDOS."
+            "Applied to both bands and DOS/PDOS. Provide one per dataset, or a single value to broadcast. "
+            "Comma-separated tokens are accepted."
         ),
     )
     p.add_argument("--fermi-line", action="store_true", help="Draw a horizontal line at E=0")
@@ -180,7 +209,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--system",
         default=None,
-        help="System label shown as a small legend entry on the bands panel (e.g. 'Zr2SeC').",
+        nargs="+",
+        help=(
+            "System label(s) used to identify datasets. Provide one per dataset, e.g. '--system Zr2SC Zr15S8C8'. "
+            "If only one label is given, it is broadcast. Comma-separated tokens are also accepted."
+        ),
     )
     p.add_argument(
         "--system-format",
@@ -198,6 +231,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--system-loc",
         default="upper left",
         help="Legend location for --system (matplotlib legend loc). Default: upper left.",
+    )
+
+    p.add_argument(
+        "--system-bbox",
+        default=None,
+        help=(
+            "Optional legend anchor (bbox_to_anchor) in axes coordinates 'x,y' (e.g. '1.02,1.0' for outside right). "
+            "If provided, legend placement uses both --system-loc and this anchor."
+        ),
     )
 
     return p
@@ -219,6 +261,13 @@ def _parse_figsize(s: Optional[str]) -> Optional[Tuple[float, float]]:
     if w <= 0 or h <= 0:
         raise SystemExit(f"Invalid --figsize {s!r}: width and height must be > 0")
     return w, h
+
+
+def _parse_xy(s: Optional[str]) -> Optional[Tuple[float, float]]:
+    if not s:
+        return None
+    a, b = str(s).split(",", 1)
+    return float(a), float(b)
 
 
 def _parse_ratios(s: str) -> Tuple[float, float]:
@@ -248,6 +297,83 @@ def _parse_n0_map(s: Optional[str]) -> Dict[str, int]:
         except ValueError as e:
             raise SystemExit(f"Invalid --n0 value for element {el!r}: {val!r} (must be integer)") from e
     return out
+
+
+def _flatten_tokens(tokens: Optional[Sequence[str]]) -> List[str]:
+    if not tokens:
+        return []
+    out: List[str] = []
+    for t in tokens:
+        if t is None:
+            continue
+        for s in str(t).split(","):
+            s2 = s.strip()
+            if s2:
+                out.append(s2)
+    return out
+
+
+def _broadcast_list(xs: Sequence[Optional[str]], n: int, name: str) -> List[Optional[str]]:
+    if len(xs) == n:
+        return list(xs)
+    if len(xs) == 1:
+        return [xs[0]] * n
+    raise SystemExit(f"{name} expects 1 value or {n} values, but got {len(xs)}")
+
+
+def _parse_float_list(tokens: Optional[Sequence[str]], *, n: int, name: str) -> List[Optional[float]]:
+    flat = _flatten_tokens(tokens)
+    if not flat:
+        return [None] * n
+    flat2 = _broadcast_list([str(x) for x in flat], n, name)
+    out: List[Optional[float]] = []
+    for t in flat2:
+        if t is None or str(t).strip() == "":
+            out.append(None)
+            continue
+        try:
+            out.append(float(t))
+        except ValueError as e:
+            raise SystemExit(f"{name} contains non-float token {t!r}") from e
+    return out
+
+
+def _map_x_to_reference(
+    x_plot: np.ndarray,
+    indices: Sequence[int],
+    ref_x_plot: np.ndarray,
+    ref_indices: Sequence[int],
+) -> np.ndarray:
+    """Piecewise linear mapping of this dataset's x axis onto the reference x axis."""
+
+    x = np.asarray(x_plot, dtype=float)
+    x_ref = np.asarray(ref_x_plot, dtype=float)
+    if len(indices) != len(ref_indices):
+        raise SystemExit("Cannot overlay: high-symmetry point count differs.")
+
+    x2 = x.copy()
+    for i in range(len(indices) - 1):
+        a = int(indices[i])
+        b = int(indices[i + 1])
+        ra = int(ref_indices[i])
+        rb = int(ref_indices[i + 1])
+        if b <= a or rb <= ra:
+            continue
+        if a < 0 or b >= len(x2) or ra < 0 or rb >= len(x_ref):
+            continue
+
+        x0 = float(x[a])
+        x1 = float(x[b])
+        rx0 = float(x_ref[ra])
+        rx1 = float(x_ref[rb])
+
+        denom = (x1 - x0)
+        if abs(denom) < 1e-14:
+            x2[a : b + 1] = rx0
+            continue
+        scale = (rx1 - rx0) / denom
+        x2[a : b + 1] = rx0 + (x[a : b + 1] - x0) * scale
+    return x2
 
 
 def _apply_scienceplots_prb_style() -> None:
@@ -724,58 +850,54 @@ def main() -> None:
     figsize_dos = _parse_figsize(args.figsize_dos)
     ratios = _parse_ratios(args.ratios)
     n0_map = _parse_n0_map(args.n0)
+    system_bbox = _parse_xy(args.system_bbox)
 
     # Style
     if args.style == "prb":
         _apply_scienceplots_prb_style()
 
-    # --- Bands data ---
-    xk, bands = _read_bands_out_gnu(args.bands)
-    specs = _read_band_in_kpoints(args.band_in)
+    bands_paths = _flatten_tokens(args.bands)
+    band_in_paths = _flatten_tokens(args.band_in)
+    tot_paths = _flatten_tokens(args.tot)
+    if not bands_paths or not band_in_paths or not tot_paths:
+        raise SystemExit("--bands/--band-in/--tot must not be empty")
 
-    label_entries: Optional[List[Tuple[Tuple[float, float, float], str]]] = None
-    if args.kpath:
-        label_entries = _read_kpath_labels(args.kpath)
+    n_dataset = max(len(bands_paths), len(band_in_paths), len(tot_paths))
+    bands_paths = _broadcast_list(bands_paths, n_dataset, "--bands")
+    band_in_paths = _broadcast_list(band_in_paths, n_dataset, "--band-in")
+    tot_paths = _broadcast_list(tot_paths, n_dataset, "--tot")
 
-    hs_labels: List[str] = []
-    for i, sp in enumerate(specs):
-        lab = None
-        if label_entries is not None:
-            lab = _find_label_for_k(sp.k, label_entries)
-        if lab is None:
-            lab = f"K{i+1}"
-        hs_labels.append(lab)
-
-    indices, scheme = _infer_indices(specs, n_data=len(xk))
-    segments = _build_segments(specs, indices)
-    xticks, xticklabels = _build_ticks_and_labels(xk, specs, indices, hs_labels)
-
-    # Apply Fermi shift to bands if requested
-    y_arrays = bands
-    if args.fermi is not None:
-        y_arrays = [b - float(args.fermi) for b in bands]
-
-    # --- DOS/PDOS data ---
-    # total DOS
-    e_tot, dos_tot = _load_two_cols(args.tot, xcol=0, ycol=args.tot_col)
-
-    # PDOS file list
-    if args.pdos is not None and len(args.pdos) > 0:
-        pdos_files = list(args.pdos)
+    kpath_paths: List[Optional[str]]
+    if args.kpath is None:
+        kpath_paths = [None] * n_dataset
     else:
-        if args.pdos_glob:
-            pattern = args.pdos_glob
+        kpath_flat = _flatten_tokens(args.kpath)
+        if not kpath_flat:
+            kpath_paths = [None] * n_dataset
         else:
-            base = os.path.basename(args.tot)
-            if base.endswith(".pdos.pdos_tot"):
-                prefix = base[: -len(".pdos.pdos_tot")]
-            else:
-                prefix = os.path.splitext(base)[0]
-            pattern = os.path.join(os.path.dirname(args.tot) or ".", f"{prefix}.pdos.pdos_atm#*")
-        pdos_files = sorted(glob.glob(pattern))
+            kpath_paths = _broadcast_list([str(x) for x in kpath_flat], n_dataset, "--kpath")
 
-    if not pdos_files:
-        raise SystemExit("No PDOS files found. Provide --pdos or a correct --pdos-glob.")
+    fermi_list = _parse_float_list(args.fermi, n=n_dataset, name="--fermi")
+
+    systems: List[Optional[str]]
+    sys_flat = _flatten_tokens(args.system)
+    if not sys_flat:
+        systems = [None] * n_dataset
+    else:
+        systems = _broadcast_list([str(x) for x in sys_flat], n_dataset, "--system")
+
+    pdos_globs: List[Optional[str]]
+    if args.pdos_glob is None:
+        pdos_globs = [None] * n_dataset
+    else:
+        pdos_glob_flat = _flatten_tokens(args.pdos_glob)
+        if not pdos_glob_flat:
+            pdos_globs = [None] * n_dataset
+        else:
+            pdos_globs = _broadcast_list([str(x) for x in pdos_glob_flat], n_dataset, "--pdos-glob")
+
+    if n_dataset > 1 and args.pdos is not None and len(args.pdos) > 0:
+        raise SystemExit("When comparing multiple datasets, --pdos (explicit file list) is not supported. Use per-dataset --pdos-glob or auto discovery from each --tot.")
 
     elements_filter = None
     if args.elements:
@@ -799,43 +921,157 @@ def main() -> None:
         if keep:
             orbitals_filter = set(keep)
 
-    e_pdos, series, labels = _load_pdos_groups(
-        tot_path=args.tot,
-        pdos_files=pdos_files,
-        elements_filter=elements_filter,
-        orbitals_filter=orbitals_filter,
-        merge_wfc=args.merge_wfc,
-        pdos_col=args.pdos_col,
-    )
+    dataset_colors = [
+        "black",
+        "tab:red",
+        "tab:blue",
+        "tab:green",
+        "tab:orange",
+        "tab:purple",
+        "tab:brown",
+        "tab:pink",
+        "tab:cyan",
+        "tab:olive",
+        "tab:gray",
+    ]
 
-    # Optional relabeling with n0 (only when not merging wfc)
-    if (not args.merge_wfc) and n0_map:
-        keys: List[Tuple[str, int, str]] = []
-        for lab in labels:
-            # lab format: El-<wfc><orb>
-            m = re.match(r"^([A-Za-z]+)-(\d+)([A-Za-z]+)$", lab)
-            if not m:
-                continue
-            keys.append((m.group(1), int(m.group(2)), m.group(3)))
-        label_map = _build_n_label_map(keys, n0_map)
-        new_series: Dict[str, np.ndarray] = {}
-        new_labels: List[str] = []
-        for lab in labels:
-            m = re.match(r"^([A-Za-z]+)-(\d+)([A-Za-z]+)$", lab)
-            if m:
-                key = (m.group(1), int(m.group(2)), m.group(3))
-                new_lab = label_map.get(key, lab)
+    # --- Load all datasets (bands + dos/pdos) ---
+    ref_xk: Optional[np.ndarray] = None
+    ref_indices: Optional[List[int]] = None
+    ref_xticks: Optional[List[float]] = None
+    ref_xticklabels: Optional[List[str]] = None
+    ref_segments: Optional[List[Tuple[int, int]]] = None
+    scheme_ref: Optional[str] = None
+
+    bands_x_plot: List[np.ndarray] = []
+    bands_y_arrays: List[List[np.ndarray]] = []
+    bands_segments: List[List[Tuple[int, int]]] = []
+
+    dos_e_tot: List[np.ndarray] = []
+    dos_tot: List[np.ndarray] = []
+    pdos_e: List[np.ndarray] = []
+    pdos_series: List[Dict[str, np.ndarray]] = []
+    pdos_labels: List[List[str]] = []
+
+    for i in range(n_dataset):
+        # --- Bands ---
+        xk_i, bands_i = _read_bands_out_gnu(str(bands_paths[i]))
+        specs_i = _read_band_in_kpoints(str(band_in_paths[i]))
+
+        label_entries_i: Optional[List[Tuple[Tuple[float, float, float], str]]] = None
+        if kpath_paths[i]:
+            label_entries_i = _read_kpath_labels(str(kpath_paths[i]))
+
+        hs_labels_i: List[str] = []
+        for j, sp in enumerate(specs_i):
+            lab = None
+            if label_entries_i is not None:
+                lab = _find_label_for_k(sp.k, label_entries_i)
+            if lab is None:
+                lab = f"K{j+1}"
+            hs_labels_i.append(lab)
+
+        indices_i, scheme_i = _infer_indices(specs_i, n_data=len(xk_i))
+        segments_i = _build_segments(specs_i, indices_i)
+        xticks_i, xticklabels_i = _build_ticks_and_labels(xk_i, specs_i, indices_i, hs_labels_i)
+
+        if i == 0:
+            ref_xk = xk_i
+            ref_indices = list(indices_i)
+            ref_xticks = list(xticks_i)
+            ref_xticklabels = list(xticklabels_i)
+            ref_segments = list(segments_i)
+            scheme_ref = scheme_i
+        else:
+            if ref_xticklabels is not None and list(xticklabels_i) != list(ref_xticklabels):
+                raise SystemExit(
+                    "Cannot overlay datasets: high-symmetry tick labels differ. "
+                    f"Reference={ref_xticklabels}, dataset#{i+1}={list(xticklabels_i)}"
+                )
+
+        # Fermi shift for bands
+        fermi_i = fermi_list[i]
+        y_arrays_i = bands_i
+        if fermi_i is not None:
+            y_arrays_i = [b - float(fermi_i) for b in bands_i]
+
+        # map x to reference (except reference itself)
+        if i == 0:
+            x_plot_i = xk_i
+        else:
+            x_plot_i = _map_x_to_reference(xk_i, indices_i, np.asarray(ref_xk, dtype=float), list(ref_indices or []))
+
+        bands_x_plot.append(x_plot_i)
+        bands_y_arrays.append(y_arrays_i)
+        bands_segments.append(list(segments_i))
+
+        # --- DOS/PDOS ---
+        e_tot_i, dos_tot_i = _load_two_cols(str(tot_paths[i]), xcol=0, ycol=args.tot_col)
+
+        # PDOS file list (per dataset)
+        if n_dataset == 1 and args.pdos is not None and len(args.pdos) > 0:
+            pdos_files_i = list(args.pdos)
+        else:
+            if pdos_globs[i]:
+                pattern = str(pdos_globs[i])
             else:
-                new_lab = lab
-            new_series[new_lab] = series[lab]
-            new_labels.append(new_lab)
-        series = new_series
-        labels = new_labels
+                base = os.path.basename(str(tot_paths[i]))
+                if base.endswith(".pdos.pdos_tot"):
+                    prefix = base[: -len(".pdos.pdos_tot")]
+                else:
+                    prefix = os.path.splitext(base)[0]
+                pattern = os.path.join(os.path.dirname(str(tot_paths[i])) or ".", f"{prefix}.pdos.pdos_atm#*")
+            pdos_files_i = sorted(glob.glob(pattern))
 
-    # Apply Fermi shift to DOS energies if requested
-    if args.fermi is not None:
-        e_tot = e_tot - float(args.fermi)
-        e_pdos = e_pdos - float(args.fermi)
+        if not pdos_files_i:
+            raise SystemExit(
+                "No PDOS files found for dataset#{idx}. Provide a correct --pdos-glob (one per dataset) or ensure auto-discovery works for --tot.".format(
+                    idx=i + 1
+                )
+            )
+
+        e_pdos_i, series_i, labels_i = _load_pdos_groups(
+            tot_path=str(tot_paths[i]),
+            pdos_files=pdos_files_i,
+            elements_filter=elements_filter,
+            orbitals_filter=orbitals_filter,
+            merge_wfc=args.merge_wfc,
+            pdos_col=args.pdos_col,
+        )
+
+        # Optional relabeling with n0 (only when not merging wfc)
+        if (not args.merge_wfc) and n0_map:
+            keys: List[Tuple[str, int, str]] = []
+            for lab in labels_i:
+                m = re.match(r"^([A-Za-z]+)-(\d+)([A-Za-z]+)$", lab)
+                if not m:
+                    continue
+                keys.append((m.group(1), int(m.group(2)), m.group(3)))
+            label_map = _build_n_label_map(keys, n0_map)
+            new_series: Dict[str, np.ndarray] = {}
+            new_labels: List[str] = []
+            for lab in labels_i:
+                m = re.match(r"^([A-Za-z]+)-(\d+)([A-Za-z]+)$", lab)
+                if m:
+                    key = (m.group(1), int(m.group(2)), m.group(3))
+                    new_lab = label_map.get(key, lab)
+                else:
+                    new_lab = lab
+                new_series[new_lab] = series_i[lab]
+                new_labels.append(new_lab)
+            series_i = new_series
+            labels_i = new_labels
+
+        # Apply Fermi shift to DOS energies
+        if fermi_i is not None:
+            e_tot_i = e_tot_i - float(fermi_i)
+            e_pdos_i = e_pdos_i - float(fermi_i)
+
+        dos_e_tot.append(e_tot_i)
+        dos_tot.append(dos_tot_i)
+        pdos_e.append(e_pdos_i)
+        pdos_series.append(series_i)
+        pdos_labels.append(list(labels_i))
 
     # --- Figure layout ---
     # Option A: absolute per-panel sizes (recommended when preparing figures for manuscripts)
@@ -871,61 +1107,131 @@ def main() -> None:
     lw_pdos = float(args.lw) if args.lw is not None else (0.8 if args.style == "prb" else 1.6)
 
     # --- Plot bands ---
-    for e in y_arrays:
-        for (s, t) in segments:
-            ax_band.plot(xk[s : t + 1], e[s : t + 1], color="black", lw=lw_band)
+    for i in range(n_dataset):
+        color_i = dataset_colors[i % len(dataset_colors)]
+        alpha_i = 1.0 if i == 0 else 0.9
+        for e in bands_y_arrays[i]:
+            for (s, t) in bands_segments[i]:
+                ax_band.plot(bands_x_plot[i][s : t + 1], e[s : t + 1], color=color_i, lw=lw_band, alpha=alpha_i)
 
-    for xpos in xticks:
+    for xpos in (ref_xticks or []):
         ax_band.axvline(xpos, color="black", lw=0.6, alpha=0.6)
 
-    ax_band.set_xticks(xticks)
-    ax_band.set_xticklabels(xticklabels)
+    ax_band.set_xticks(list(ref_xticks or []))
+    ax_band.set_xticklabels(list(ref_xticklabels or []))
     # Keep only high-symmetry vertical lines on x-axis; hide tick marks (but keep labels).
     ax_band.tick_params(axis="x", which="both", bottom=False, top=False, length=0)
 
-    if args.system:
-        sys_lab = _format_system_label(str(args.system), str(args.system_format))
-        h = Line2D([], [], color="none", label=sys_lab)
-        fs = args.system_fontsize
-        if fs is None:
-            try:
-                fs = float(ax_band.yaxis.label.get_size()) * 1.15
-            except Exception:
-                fs = None
-        leg_sys = ax_band.legend(
-            handles=[h],
-            loc=str(args.system_loc),
-            frameon=False,
-            handlelength=0,
-            handletextpad=0.0,
-            borderaxespad=0.2,
-            fontsize=fs,
-        )
-        if leg_sys is not None:
-            for t in leg_sys.get_texts():
-                t.set_fontweight("bold")
+    if any(s is not None and str(s).strip() for s in systems):
+        handles_sys: List[Line2D] = []
+        for i in range(n_dataset):
+            if systems[i] is None or str(systems[i]).strip() == "":
+                continue
+            sys_lab = _format_system_label(str(systems[i]), str(args.system_format))
+            color_i = dataset_colors[i % len(dataset_colors)]
+            if n_dataset == 1:
+                handles_sys.append(Line2D([], [], color="none", label=sys_lab))
+            else:
+                handles_sys.append(Line2D([], [], color=color_i, lw=lw_band, label=sys_lab))
+
+        if handles_sys:
+            fs = args.system_fontsize
+            if fs is None:
+                try:
+                    fs = float(ax_band.yaxis.label.get_size()) * 1.15
+                except Exception:
+                    fs = None
+            if system_bbox is None:
+                leg_sys = ax_band.legend(
+                    handles=handles_sys,
+                    loc=str(args.system_loc),
+                    frameon=False,
+                    handlelength=(0 if n_dataset == 1 else 1.8),
+                    handletextpad=(0.0 if n_dataset == 1 else 0.6),
+                    borderaxespad=0.2,
+                    fontsize=fs,
+                )
+            else:
+                leg_sys = ax_band.legend(
+                    handles=handles_sys,
+                    loc=str(args.system_loc),
+                    bbox_to_anchor=system_bbox,
+                    bbox_transform=ax_band.transAxes,
+                    frameon=False,
+                    handlelength=(0 if n_dataset == 1 else 1.8),
+                    handletextpad=(0.0 if n_dataset == 1 else 0.6),
+                    borderaxespad=0.2,
+                    fontsize=fs,
+                )
+            if leg_sys is not None:
+                for t in leg_sys.get_texts():
+                    t.set_fontweight("bold")
 
     # --- Plot rotated DOS/PDOS (x = DOS, y = Energy) ---
     # Total DOS (optional)
-    if plot_total:
-        ax_dos.plot(dos_tot, e_tot, color="black", lw=lw_tot, label="Total")
+    total_rgbs: List[Tuple[float, float, float]] = []
+    for i in range(min(n_dataset, len(dataset_colors))):
+        try:
+            total_rgbs.append(tuple(float(x) for x in to_rgb(dataset_colors[i])))
+        except Exception:
+            pass
 
-    color_cycle = [
-        "tab:red",
-        "tab:blue",
-        "tab:green",
-        "tab:orange",
-        "tab:purple",
-        "tab:brown",
-        "tab:pink",
-        "tab:cyan",
-        "tab:olive",
-        "tab:gray",
-    ]
+    pdos_color_pool: List[Tuple[float, float, float]] = []
+    for cmap_name in ("tab20", "tab20b", "tab20c"):
+        try:
+            cols = list(plt.get_cmap(cmap_name).colors)
+        except Exception:
+            continue
+        for c in cols:
+            rgb = tuple(float(x) for x in c)
+            # Filter out colors too close to any total-DOS (dataset) color.
+            too_close = False
+            for tr in total_rgbs:
+                d = ((rgb[0] - tr[0]) ** 2 + (rgb[1] - tr[1]) ** 2 + (rgb[2] - tr[2]) ** 2) ** 0.5
+                if d < 0.12:
+                    too_close = True
+                    break
+            if not too_close:
+                pdos_color_pool.append(rgb)
 
-    for i, lab in enumerate(labels):
-        y = series[lab]
-        ax_dos.plot(y, e_pdos, lw=lw_pdos, color=color_cycle[i % len(color_cycle)], label=lab)
+    if not pdos_color_pool:
+        pdos_color_pool = [tuple(float(x) for x in c) for c in plt.get_cmap("tab20").colors]
+
+    def pick_pdos_color(j: int, taken: List[Tuple[float, float, float]]) -> Tuple[float, float, float]:
+        for k in range(len(pdos_color_pool)):
+            cand = pdos_color_pool[(j + k) % len(pdos_color_pool)]
+            if cand in taken:
+                continue
+            return cand
+        return pdos_color_pool[j % len(pdos_color_pool)]
+
+    taken_pdos: List[Tuple[float, float, float]] = []
+
+    for i in range(n_dataset):
+        color_i = dataset_colors[i % len(dataset_colors)]
+        alpha_i = 1.0 if i == 0 else 0.9
+        sys_i = systems[i]
+        sys_prefix = None
+        if n_dataset > 1:
+            if sys_i is not None and str(sys_i).strip():
+                sys_prefix = str(sys_i)
+            else:
+                sys_prefix = f"D{i+1}"
+
+        if plot_total:
+            if sys_prefix is None:
+                lab_tot = "Total"
+            else:
+                lab_tot = f"{sys_prefix}:Total"
+            ax_dos.plot(dos_tot[i], dos_e_tot[i], color=color_i, lw=lw_tot, alpha=alpha_i, label=lab_tot)
+
+        # PDOS
+        for lab in pdos_labels[i]:
+            y = pdos_series[i][lab]
+            c = pick_pdos_color(len(taken_pdos), taken_pdos)
+            taken_pdos.append(c)
+            lab2 = lab if sys_prefix is None else f"{sys_prefix}:{lab}"
+            ax_dos.plot(y, pdos_e[i], lw=lw_pdos, color=c, alpha=alpha_i, label=lab2)
 
     # Shared y decorations
     if args.fermi_line:
@@ -935,29 +1241,33 @@ def main() -> None:
     if ylim:
         ax_band.set_ylim(*ylim)
 
-    ax_band.set_xlim(float(xk[0]), float(xk[-1]))
+    if ref_xk is not None:
+        ax_band.set_xlim(float(ref_xk[0]), float(ref_xk[-1]))
 
     # DOS xlim auto unless specified
     if dos_xlim:
         ax_dos.set_xlim(*dos_xlim)
     else:
         # estimate from visible range (respect ylim if provided)
-        if ylim:
-            mask_tot = (e_tot >= ylim[0]) & (e_tot <= ylim[1])
-            mask_p = (e_pdos >= ylim[0]) & (e_pdos <= ylim[1])
-        else:
-            mask_tot = slice(None)
-            mask_p = slice(None)
-
         xmax = 0.0
-        if plot_total:
-            xmax = max(xmax, float(np.nanmax(dos_tot[mask_tot])))
-        for lab in labels:
-            xmax = max(xmax, float(np.nanmax(series[lab][mask_p])))
+        for i in range(n_dataset):
+            if ylim:
+                mask_tot = (dos_e_tot[i] >= ylim[0]) & (dos_e_tot[i] <= ylim[1])
+                mask_p = (pdos_e[i] >= ylim[0]) & (pdos_e[i] <= ylim[1])
+            else:
+                mask_tot = slice(None)
+                mask_p = slice(None)
+
+            if plot_total:
+                xmax = max(xmax, float(np.nanmax(dos_tot[i][mask_tot])))
+            for lab in pdos_labels[i]:
+                xmax = max(xmax, float(np.nanmax(pdos_series[i][lab][mask_p])))
+
         ax_dos.set_xlim(0.0, xmax * 1.05 if xmax > 0 else 1.0)
 
     # Labels: keep compact xlabel on PDOS panel and show x-axis tick values
-    ax_band.set_ylabel(r"$E - E_{f}$ (eV)" if args.fermi is not None else "Energy (eV)")
+    any_fermi = any(x is not None for x in fermi_list)
+    ax_band.set_ylabel(r"$E - E_{f}$ (eV)" if any_fermi else "Energy (eV)")
 
     ax_dos.set_xlabel("Electron DOS\n(states/eV/unit cell)")
     try:
@@ -986,7 +1296,10 @@ def main() -> None:
     fig.savefig(args.out, dpi=300)
 
     print(f"Saved: {args.out}")
-    print(f"K-point indexing convention: {scheme} (data points per band: {len(xk)})")
+    if scheme_ref is not None and ref_xk is not None:
+        print(f"K-point indexing convention (reference): {scheme_ref} (data points per band: {len(ref_xk)})")
+    else:
+        print("K-point indexing convention: (unknown)")
 
     if args.show:
         plt.show()

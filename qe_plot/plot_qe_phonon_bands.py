@@ -41,9 +41,24 @@ def _build_parser() -> argparse.ArgumentParser:
         )
     )
 
-    p.add_argument("--freq", required=True, help="Path to *.freq.gp (matdyn band output)")
-    p.add_argument("--matdyn-in", required=True, help="Path to matdyn.in")
-    p.add_argument("--kpath", default=None, help="Path to KPATH.in (VASPKIT). If omitted, labels are guessed.")
+    p.add_argument(
+        "--freq",
+        required=True,
+        nargs="+",
+        help="One or more *.freq.gp files (matdyn band output). If multiple are given, they are overlaid for comparison.",
+    )
+    p.add_argument(
+        "--matdyn-in",
+        required=True,
+        nargs="+",
+        help="One or more matdyn.in files. If a single file is given, it is reused for all datasets.",
+    )
+    p.add_argument(
+        "--kpath",
+        default=None,
+        nargs="+",
+        help="One or more KPATH.in files (VASPKIT). If omitted, labels are guessed. If a single file is given, it is reused.",
+    )
 
     p.add_argument(
         "--style",
@@ -92,7 +107,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--system",
         default=None,
-        help="System label shown as a small legend entry (e.g. 'Zr2SeC').",
+        nargs="+",
+        help=(
+            "System label(s) used as curve labels. Provide one per dataset, e.g. '--system Zr2SC Zr15S8C8'. "
+            "If only one label is given, it is broadcast. Comma-separated tokens are also accepted."
+        ),
     )
     p.add_argument(
         "--system-format",
@@ -110,6 +129,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--system-loc",
         default="upper left",
         help="Legend location for --system (matplotlib legend loc). Default: upper left.",
+    )
+    p.add_argument(
+        "--system-bbox",
+        default=None,
+        help=(
+            "Optional legend anchor (bbox_to_anchor) in axes coordinates 'x,y' (e.g. '1.02,1.0' for outside right). "
+            "If provided, legend placement uses both --system-loc and this anchor."
+        ),
     )
 
     return p
@@ -136,6 +163,13 @@ def _parse_figsize(s: Optional[str]) -> Optional[Tuple[float, float]]:
     if w <= 0 or h <= 0:
         raise SystemExit(f"Invalid --figsize {s!r}: width and height must be > 0")
     return w, h
+
+
+def _parse_xy(s: Optional[str]) -> Optional[Tuple[float, float]]:
+    if not s:
+        return None
+    a, b = str(s).split(",", 1)
+    return float(a), float(b)
 
 
 def _apply_scienceplots_prb_style() -> None:
@@ -213,7 +247,14 @@ def _read_matdyn_in_qpoints(path: str) -> List[KPointSpec]:
     try:
         nq = int(lines[j].strip().split()[0])
     except ValueError as e:
-        raise SystemExit(f"Cannot parse q-point count in {path}: {lines[j]!r}") from e
+        hint = ""
+        low = str(path).lower()
+        if low.endswith(".gp") or "freq" in low:
+            hint = (
+                "\nHint: --matdyn-in expects a QE matdyn input file (matdyn.in). "
+                "It looks like you may have passed a *.freq.gp file by mistake."
+            )
+        raise SystemExit(f"Cannot parse q-point count in {path}: {lines[j]!r}{hint}") from e
 
     specs: List[KPointSpec] = []
     j += 1
@@ -330,6 +371,76 @@ def _infer_indices(specs: Sequence[KPointSpec], n_data: int) -> Tuple[List[int],
     if abs(len1 - n_data) <= abs(len2 - n_data):
         return ind1, "overlap*"
     return ind2, "no-overlap*"
+
+
+def _flatten_tokens(tokens: Optional[Sequence[str]]) -> List[str]:
+    if not tokens:
+        return []
+    out: List[str] = []
+    for t in tokens:
+        if t is None:
+            continue
+        for s in str(t).split(","):
+            s2 = s.strip()
+            if s2:
+                out.append(s2)
+    return out
+
+
+def _broadcast_list(xs: Sequence[str], n: int, name: str) -> List[str]:
+    if len(xs) == n:
+        return list(xs)
+    if len(xs) == 1:
+        return [str(xs[0])] * n
+    raise SystemExit(f"{name} expects 1 value or {n} values, but got {len(xs)}")
+
+
+def _map_x_to_reference(
+    x_plot: np.ndarray,
+    indices: Sequence[int],
+    ref_x_plot: np.ndarray,
+    ref_indices: Sequence[int],
+) -> np.ndarray:
+    """Piecewise linear mapping of this dataset's x axis onto the reference x axis.
+
+    Mapping is done segment-by-segment between consecutive high-symmetry points.
+    This allows overlaying different structures with different raw x coordinates.
+    """
+
+    x = np.asarray(x_plot, dtype=float)
+    x_ref = np.asarray(ref_x_plot, dtype=float)
+    if len(x) != len(x_ref):
+        # We still can map as long as indices are compatible; the per-row mapping uses x itself.
+        pass
+
+    if len(indices) != len(ref_indices):
+        raise SystemExit("Cannot overlay: high-symmetry point count differs.")
+
+    x2 = x.copy()
+    for i in range(len(indices) - 1):
+        a = int(indices[i])
+        b = int(indices[i + 1])
+        ra = int(ref_indices[i])
+        rb = int(ref_indices[i + 1])
+        if b <= a or rb <= ra:
+            continue
+        if a < 0 or b >= len(x2) or ra < 0 or rb >= len(x_ref):
+            continue
+
+        x0 = float(x[a])
+        x1 = float(x[b])
+        rx0 = float(x_ref[ra])
+        rx1 = float(x_ref[rb])
+
+        denom = (x1 - x0)
+        if abs(denom) < 1e-14:
+            x2[a : b + 1] = rx0
+            continue
+
+        scale = (rx1 - rx0) / denom
+        x2[a : b + 1] = rx0 + (x[a : b + 1] - x0) * scale
+
+    return x2
 
 
 def _compress_x_jumps_by_specs(x: np.ndarray, specs: Sequence[KPointSpec], indices: Sequence[int]) -> np.ndarray:
@@ -507,6 +618,7 @@ def main() -> None:
 
     ylim = _parse_lim(args.ylim)
     figsize = _parse_figsize(args.figsize)
+    system_bbox = _parse_xy(args.system_bbox)
 
     if args.lw is not None and float(args.lw) <= 0:
         raise SystemExit("--lw must be > 0")
@@ -514,32 +626,23 @@ def main() -> None:
     if args.style == "prb":
         _apply_scienceplots_prb_style()
 
-    x, ymat = _read_freq_gp(args.freq)
-    ymat = _convert_freq_units(ymat, args.unit)
-    specs = _read_matdyn_in_qpoints(args.matdyn_in)
+    freq_paths = [str(x) for x in args.freq]
+    n_cases = len(freq_paths)
 
-    label_entries: Optional[List[Tuple[Tuple[float, float, float], str]]] = None
-    if args.kpath:
-        label_entries = _read_kpath_labels(args.kpath)
-
-    hs_labels: List[str] = []
-    for i, sp in enumerate(specs):
-        lab = None
-        if label_entries is not None:
-            lab = _find_label_for_q(sp.q, label_entries)
-        if lab is None:
-            lab = f"Q{i+1}"
-        hs_labels.append(lab)
-
-    indices, scheme = _infer_indices(specs, n_data=len(x))
-    segments = _build_segments(specs, indices)
-
-    if args.keep_jumps:
-        x_plot = x
+    matdyn_paths = _broadcast_list([str(x) for x in args.matdyn_in], n_cases, "--matdyn-in")
+    kpath_args = args.kpath
+    kpath_paths: List[Optional[str]] = []
+    if kpath_args is None:
+        kpath_paths = [None] * n_cases
     else:
-        x_plot = _compress_x_jumps_by_specs(x, specs, indices)
+        kps = _broadcast_list([str(x) for x in kpath_args], n_cases, "--kpath")
+        kpath_paths = [str(x) for x in kps]
 
-    xticks, xticklabels = _build_ticks_and_labels(x_plot, specs, indices, hs_labels)
+    systems = _flatten_tokens(args.system)
+    if systems:
+        systems = _broadcast_list(systems, n_cases, "--system")
+    else:
+        systems = [""] * n_cases
 
     if figsize is not None:
         fig, ax = plt.subplots(figsize=figsize)
@@ -548,46 +651,135 @@ def main() -> None:
 
     lw = float(args.lw) if args.lw is not None else (0.8 if args.style == "prb" else 1.4)
 
-    # Plot each phonon branch; break at jumps by plotting per-segment.
-    n_branch = int(ymat.shape[1])
-    for j in range(n_branch):
-        e = ymat[:, j]
-        for (s, t) in segments:
-            ax.plot(x_plot[s : t + 1], e[s : t + 1], color="black", lw=lw)
+    # Reference axis (first dataset)
+    ref_xticks: Optional[List[float]] = None
+    ref_xticklabels: Optional[List[str]] = None
+    ref_xlim: Optional[Tuple[float, float]] = None
+    ref_x_plot: Optional[np.ndarray] = None
+    ref_indices: Optional[List[int]] = None
 
-    for xpos in xticks:
+    # High-contrast dataset colors: black, red, blue, ...
+    case_colors = [
+        "black",
+        "tab:red",
+        "tab:blue",
+        "tab:green",
+        "tab:orange",
+        "tab:purple",
+        "tab:brown",
+        "tab:cyan",
+        "tab:pink",
+        "tab:olive",
+        "tab:gray",
+    ]
+
+    scheme = None
+    for ic in range(n_cases):
+        x, ymat = _read_freq_gp(freq_paths[ic])
+        ymat = _convert_freq_units(ymat, args.unit)
+        specs = _read_matdyn_in_qpoints(matdyn_paths[ic])
+
+        label_entries: Optional[List[Tuple[Tuple[float, float, float], str]]] = None
+        kp = kpath_paths[ic]
+        if kp:
+            label_entries = _read_kpath_labels(kp)
+
+        hs_labels: List[str] = []
+        for i, sp in enumerate(specs):
+            lab = None
+            if label_entries is not None:
+                lab = _find_label_for_q(sp.q, label_entries)
+            if lab is None:
+                lab = f"Q{i+1}"
+            hs_labels.append(lab)
+
+        indices, scheme_i = _infer_indices(specs, n_data=len(x))
+        scheme = scheme or scheme_i
+        segments = _build_segments(specs, indices)
+
+        if args.keep_jumps:
+            x_plot = x
+        else:
+            x_plot = _compress_x_jumps_by_specs(x, specs, indices)
+
+        xticks, xticklabels = _build_ticks_and_labels(x_plot, specs, indices, hs_labels)
+
+        if ref_xticks is None:
+            ref_xticks = xticks
+            ref_xticklabels = xticklabels
+            ref_xlim = (float(x_plot[0]), float(x_plot[-1]))
+            ref_x_plot = np.asarray(x_plot, dtype=float)
+            ref_indices = list(indices)
+        else:
+            if len(xticklabels) != len(ref_xticklabels):
+                raise SystemExit("Cannot overlay multiple datasets: high-symmetry tick count differs.")
+            if any(a != b for a, b in zip(xticklabels, ref_xticklabels)):
+                raise SystemExit("Cannot overlay multiple datasets: high-symmetry labels differ.")
+
+        # Map x to reference axis
+        if ref_x_plot is None or ref_indices is None:
+            x_mapped = np.asarray(x_plot, dtype=float)
+        else:
+            x_mapped = _map_x_to_reference(x_plot, indices, ref_x_plot, ref_indices)
+
+        col = case_colors[ic % len(case_colors)]
+        alpha = 1.0 if ic == 0 else 0.65
+        n_branch = int(ymat.shape[1])
+        for j in range(n_branch):
+            e = ymat[:, j]
+            for (s, t) in segments:
+                ax.plot(x_mapped[s : t + 1], e[s : t + 1], color=col, lw=lw, alpha=alpha)
+
+    if ref_xticks is None or ref_xticklabels is None or ref_xlim is None:
+        raise SystemExit("No dataset loaded")
+
+    for xpos in ref_xticks:
         ax.axvline(xpos, color="black", lw=0.6, alpha=0.6)
 
-    ax.set_xticks(xticks)
-    ax.set_xticklabels(xticklabels)
+    ax.set_xticks(ref_xticks)
+    ax.set_xticklabels(ref_xticklabels)
     # Keep only high-symmetry vertical lines on x-axis; hide tick marks (but keep labels).
     ax.tick_params(axis="x", which="both", bottom=False, top=False, length=0)
 
-    if args.system:
-        sys_lab = _format_system_label(str(args.system), str(args.system_format))
-        h = Line2D([], [], color="none", label=sys_lab)
+    ax.set_xlim(*ref_xlim)
+    if ylim:
+        ax.set_ylim(*ylim)
+
+    # System legend: one entry per dataset
+    if any(systems):
+        handles: List[Line2D] = []
+        for ic in range(n_cases):
+            if not systems[ic]:
+                continue
+            sys_lab = _format_system_label(str(systems[ic]), str(args.system_format))
+            col = case_colors[ic % len(case_colors)]
+            handles.append(Line2D([0], [0], color=col, lw=lw, label=sys_lab))
+
         fs = args.system_fontsize
         if fs is None:
             try:
                 fs = float(ax.yaxis.label.get_size()) * 1.15
             except Exception:
                 fs = None
-        leg = ax.legend(
-            handles=[h],
-            loc=str(args.system_loc),
-            frameon=False,
-            handlelength=0,
-            handletextpad=0.0,
-            borderaxespad=0.2,
-            fontsize=fs,
-        )
+        if system_bbox is None:
+            leg = ax.legend(
+                handles=handles,
+                loc=str(args.system_loc),
+                frameon=False,
+                fontsize=fs,
+            )
+        else:
+            leg = ax.legend(
+                handles=handles,
+                loc=str(args.system_loc),
+                bbox_to_anchor=system_bbox,
+                bbox_transform=ax.transAxes,
+                frameon=False,
+                fontsize=fs,
+            )
         if leg is not None:
             for t in leg.get_texts():
                 t.set_fontweight("bold")
-
-    ax.set_xlim(float(x_plot[0]), float(x_plot[-1]))
-    if ylim:
-        ax.set_ylim(*ylim)
 
     if args.ylabel is not None:
         ylab = args.ylabel
@@ -609,7 +801,8 @@ def main() -> None:
     fig.savefig(args.out, dpi=300)
 
     print(f"Saved: {args.out}")
-    print(f"Q-point indexing convention: {scheme} (data points per branch: {len(x)})")
+    if scheme is not None:
+        print(f"Q-point indexing convention: {scheme}")
 
     if args.show:
         plt.show()

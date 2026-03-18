@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.lines import Line2D
 
 
 _CM1_PER_THz = 33.35641  # THz = (cm^-1)/33.35641
@@ -32,8 +33,41 @@ def _build_parser() -> argparse.ArgumentParser:
         )
     )
 
-    p.add_argument("--dos", required=True, help="Path to phonon DOS file (e.g. zr2sc.dos)")
-    p.add_argument("--scf-in", required=True, help="Path to QE scf input (used to map PDOS columns to atoms)")
+    p.add_argument(
+        "--dos",
+        required=True,
+        nargs="+",
+        help=(
+            "One or more phonon DOS files (e.g. zr2sc.dos). "
+            "If multiple are given, the script overlays them for comparison (total DOS only)."
+        ),
+    )
+    p.add_argument(
+        "--scf-in",
+        required=True,
+        nargs="+",
+        help=(
+            "One or more QE scf inputs (used to map PDOS columns to atoms). "
+            "If a single scf.in is given, it is reused for all --dos inputs."
+        ),
+    )
+    p.add_argument(
+        "--labels",
+        default=None,
+        help=(
+            "Optional comma-separated labels for each dataset when using multiple --dos. "
+            "If omitted, labels are derived from DOS filenames."
+        ),
+    )
+    p.add_argument(
+        "--dos-norm",
+        default=None,
+        help=(
+            "Per-dataset integer normalization factors (comma-separated). "
+            "Each DOS/PDOS curve is divided by its factor after reading. "
+            "Typical use: supercell DOS -> per unit cell (e.g. 2x2x2: factor=8)."
+        ),
+    )
 
     p.add_argument(
         "--group",
@@ -101,6 +135,42 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--title", default=None, help="Plot title")
 
     p.add_argument(
+        "--system",
+        default=None,
+        nargs="+",
+        help=(
+            "Optional system label(s) shown as a separate legend text. "
+            "Provide one per dataset when using multiple --dos; a single value is broadcast. "
+            "Comma-separated tokens are accepted."
+        ),
+    )
+    p.add_argument(
+        "--system-format",
+        choices=["chem", "raw"],
+        default="chem",
+        help="Render --system as chemical formula with subscripts (chem) or raw text (raw). Default: chem.",
+    )
+    p.add_argument(
+        "--system-fontsize",
+        type=float,
+        default=None,
+        help="Font size for --system legend text. If omitted, uses an automatic larger size.",
+    )
+    p.add_argument(
+        "--system-loc",
+        default="upper left",
+        help="Legend location for --system (matplotlib legend loc). Default: upper left.",
+    )
+    p.add_argument(
+        "--system-bbox",
+        default=None,
+        help=(
+            "Optional legend anchor (bbox_to_anchor) in axes coordinates 'x,y' (e.g. '1.02,1.0' for outside right). "
+            "If provided, legend placement uses both --system-loc and this anchor."
+        ),
+    )
+
+    p.add_argument(
         "--legend-loc",
         default="best",
         help="Legend location inside the axes (matplotlib loc=...) [default: best]",
@@ -134,6 +204,37 @@ def _parse_figsize(s: Optional[str]) -> Optional[Tuple[float, float]]:
     if w <= 0 or h <= 0:
         raise SystemExit(f"Invalid --figsize {s!r}: width and height must be > 0")
     return w, h
+
+
+def _parse_xy(s: Optional[str]) -> Optional[Tuple[float, float]]:
+    if not s:
+        return None
+    a, b = str(s).split(",", 1)
+    return float(a), float(b)
+
+
+def _flatten_tokens(tokens: Optional[Sequence[str]]) -> List[str]:
+    if not tokens:
+        return []
+    out: List[str] = []
+    for t in tokens:
+        if t is None:
+            continue
+        for s in str(t).split(","):
+            s2 = s.strip()
+            if s2:
+                out.append(s2)
+    return out
+
+
+def _format_system_label(label: str, mode: str) -> str:
+    if not label:
+        return label
+    if mode == "raw":
+        return label
+    if "$" in label:
+        return label
+    return re.sub(r"(?<=[A-Za-z\)])(\d+)", r"$_{\1}$", label)
 
 
 def _read_nat_from_scf_in(path: str) -> Optional[int]:
@@ -295,12 +396,44 @@ def _convert_dos_unit_for_x(
     return dos * _CM1_PER_THz, pdos * _CM1_PER_THz
 
 
+def _parse_csv_list(s: Optional[str]) -> Optional[List[str]]:
+    if s is None:
+        return None
+    parts = [x.strip() for x in str(s).split(",") if x.strip()]
+    return parts if parts else None
+
+
+def _parse_csv_ints(s: Optional[str]) -> Optional[List[int]]:
+    parts = _parse_csv_list(s)
+    if parts is None:
+        return None
+    out: List[int] = []
+    for p in parts:
+        try:
+            v = int(p)
+        except ValueError as e:
+            raise SystemExit(f"Invalid --dos-norm entry {p!r}: must be integer") from e
+        if v <= 0:
+            raise SystemExit(f"Invalid --dos-norm entry {p!r}: must be > 0")
+        out.append(v)
+    return out
+
+
+def _broadcast_list(name: str, values: Sequence, n: int) -> List:
+    if len(values) == n:
+        return list(values)
+    if len(values) == 1 and n > 1:
+        return [values[0]] * n
+    raise SystemExit(f"Length mismatch for {name}: got {len(values)}, expected 1 or {n}")
+
+
 def main() -> None:
     args = _build_parser().parse_args()
 
     xlim = _parse_lim(args.xlim)
     ylim = _parse_lim(args.ylim)
     figsize = _parse_figsize(args.figsize)
+    system_bbox = _parse_xy(args.system_bbox)
 
     if args.lw is not None and float(args.lw) <= 0:
         raise SystemExit("--lw must be > 0")
@@ -308,57 +441,31 @@ def main() -> None:
     if args.style == "prb":
         _apply_scienceplots_prb_style()
 
-    x_cm1, dos_tot, pdos_mat = _read_phonon_dos_table(args.dos)
-    nat_from_scf = _read_nat_from_scf_in(args.scf_in)
-    atoms = _read_atoms_from_scf_in(args.scf_in, expected_nat=nat_from_scf)
+    dos_paths = list(args.dos)
+    scf_paths = list(args.scf_in)
+    labels_in = _parse_csv_list(args.labels)
+    norms_in = _parse_csv_ints(args.dos_norm)
 
-    n_atoms = nat_from_scf if nat_from_scf is not None else len(atoms)
-    if pdos_mat.shape[1] != 0 and pdos_mat.shape[1] != n_atoms:
-        raise SystemExit(
-            f"PDOS column count mismatch: DOS file has {pdos_mat.shape[1]} per-atom columns, "
-            f"but scf.in has {n_atoms} atoms. Please confirm the DOS file format/order."
-        )
+    systems_in = _flatten_tokens(args.system)
 
-    x = _convert_x_unit(x_cm1, args.unit)
+    n_cases = max(len(dos_paths), len(scf_paths), len(labels_in or ["x"]), len(norms_in or [1]))
+    dos_paths = _broadcast_list("--dos", dos_paths, n_cases)
+    scf_paths = _broadcast_list("--scf-in", scf_paths, n_cases)
 
-    # Keep DOS/PDOS unit consistent with selected x unit
-    dos_tot, pdos_mat = _convert_dos_unit_for_x(
-        dos_tot,
-        pdos_mat,
-        x_unit=str(args.unit),
-        disable_jacobian=bool(args.no_jacobian),
-    )
-
-    elements_filter: Optional[set[str]] = None
-    if args.elements:
-        elements_filter = {x.strip() for x in args.elements.split(",") if x.strip()}
-
-    # Build PDOS series
-    series: Dict[str, np.ndarray] = {}
-
-    if pdos_mat.shape[1] == 0:
-        # no PDOS columns available
-        pass
-    elif args.group == "atom":
-        selected_atoms = _parse_atom_selection(args.atoms, n_atoms=n_atoms)
-        for ia in selected_atoms:
-            el = atoms[ia - 1].element
-            if elements_filter is not None and el not in elements_filter:
-                continue
-            lab = f"{el}{ia}"
-            series[lab] = pdos_mat[:, ia - 1]
+    if labels_in is None:
+        labels = [Path(p).stem for p in dos_paths]
     else:
-        # element-summed
-        by_el: Dict[str, np.ndarray] = {}
-        for ia, atom in enumerate(atoms, start=1):
-            el = atom.element
-            if elements_filter is not None and el not in elements_filter:
-                continue
-            if el not in by_el:
-                by_el[el] = np.zeros_like(dos_tot, dtype=float)
-            by_el[el] += pdos_mat[:, ia - 1]
-        for el in sorted(by_el.keys()):
-            series[el] = by_el[el]
+        labels = _broadcast_list("--labels", labels_in, n_cases)
+
+    if systems_in:
+        systems = _broadcast_list("--system", systems_in, n_cases)
+    else:
+        systems = [""] * n_cases
+
+    if norms_in is None:
+        norms = [1] * n_cases
+    else:
+        norms = _broadcast_list("--dos-norm", norms_in, n_cases)
 
     # --- Plot ---
     if figsize is not None:
@@ -368,10 +475,19 @@ def main() -> None:
 
     lw = float(args.lw) if args.lw is not None else (0.8 if args.style == "prb" else 1.6)
 
-    # total DOS
-    ax.plot(x, dos_tot, color="black", lw=lw, label="Total DOS")
+    # Multi-dataset compare mode: overlay total DOS only (keeps the figure readable)
+    if n_cases > 1:
+        print(
+            f"Detected {n_cases} datasets. For comparison mode, only total DOS curves are plotted (PDOS is skipped)."
+        )
 
-    color_cycle = [
+    show_curve_legend = True
+    if n_cases > 1 and any(systems):
+        # When --system is provided, use the system legend to identify datasets to avoid duplicate legends.
+        show_curve_legend = False
+
+    case_colors = [
+        "black",
         "tab:red",
         "tab:blue",
         "tab:green",
@@ -383,8 +499,93 @@ def main() -> None:
         "tab:olive",
         "tab:gray",
     ]
-    for i, (lab, y) in enumerate(series.items()):
-        ax.plot(x, y, lw=lw, color=color_cycle[i % len(color_cycle)], label=lab)
+
+    x_ref: Optional[np.ndarray] = None
+    for ic in range(n_cases):
+        dos_path = str(dos_paths[ic])
+        scf_path = str(scf_paths[ic])
+        lab_case = str(labels[ic])
+        norm = int(norms[ic])
+
+        x_cm1, dos_tot, pdos_mat = _read_phonon_dos_table(dos_path)
+        nat_from_scf = _read_nat_from_scf_in(scf_path)
+        atoms = _read_atoms_from_scf_in(scf_path, expected_nat=nat_from_scf)
+
+        n_atoms = nat_from_scf if nat_from_scf is not None else len(atoms)
+        if pdos_mat.shape[1] != 0 and pdos_mat.shape[1] != n_atoms:
+            raise SystemExit(
+                f"PDOS column count mismatch for {dos_path!r}: DOS file has {pdos_mat.shape[1]} per-atom columns, "
+                f"but scf.in has {n_atoms} atoms ({scf_path!r})."
+            )
+
+        x = _convert_x_unit(x_cm1, args.unit)
+        dos_tot, pdos_mat = _convert_dos_unit_for_x(
+            dos_tot,
+            pdos_mat,
+            x_unit=str(args.unit),
+            disable_jacobian=bool(args.no_jacobian),
+        )
+
+        # Per-dataset normalization (e.g. supercell -> per unit cell)
+        if norm != 1:
+            dos_tot = dos_tot / float(norm)
+            pdos_mat = pdos_mat / float(norm)
+
+        if x_ref is None:
+            x_ref = x
+        else:
+            if len(x) != len(x_ref) or float(np.max(np.abs(x - x_ref))) > 1e-8:
+                raise SystemExit(
+                    "Multiple datasets must share the same x-grid to be overlaid. "
+                    f"Mismatch detected for {dos_path!r}."
+                )
+
+        col = case_colors[ic % len(case_colors)]
+        ax.plot(x, dos_tot, color=col, lw=lw, label=(lab_case if show_curve_legend else "_nolegend_"))
+
+        # PDOS is only plotted in single-dataset mode.
+        if n_cases == 1:
+            elements_filter: Optional[set[str]] = None
+            if args.elements:
+                elements_filter = {x.strip() for x in args.elements.split(",") if x.strip()}
+
+            series: Dict[str, np.ndarray] = {}
+            if pdos_mat.shape[1] == 0:
+                pass
+            elif args.group == "atom":
+                selected_atoms = _parse_atom_selection(args.atoms, n_atoms=n_atoms)
+                for ia in selected_atoms:
+                    el = atoms[ia - 1].element
+                    if elements_filter is not None and el not in elements_filter:
+                        continue
+                    lab = f"{el}{ia}"
+                    series[lab] = pdos_mat[:, ia - 1]
+            else:
+                by_el: Dict[str, np.ndarray] = {}
+                for ia, atom in enumerate(atoms, start=1):
+                    el = atom.element
+                    if elements_filter is not None and el not in elements_filter:
+                        continue
+                    if el not in by_el:
+                        by_el[el] = np.zeros_like(dos_tot, dtype=float)
+                    by_el[el] += pdos_mat[:, ia - 1]
+                for el in sorted(by_el.keys()):
+                    series[el] = by_el[el]
+
+            color_cycle = [
+                "tab:red",
+                "tab:blue",
+                "tab:green",
+                "tab:orange",
+                "tab:purple",
+                "tab:brown",
+                "tab:pink",
+                "tab:cyan",
+                "tab:olive",
+                "tab:gray",
+            ]
+            for i, (lab, y) in enumerate(series.items()):
+                ax.plot(x, y, lw=lw, color=color_cycle[i % len(color_cycle)], label=lab)
 
     if xlim:
         ax.set_xlim(*xlim)
@@ -403,15 +604,57 @@ def main() -> None:
     if args.title:
         ax.set_title(args.title)
     else:
-        ax.set_title("Phonon DOS")
+        ax.set_title("Phonon DOS" if n_cases == 1 else "Phonon DOS (comparison)")
 
     ax.grid(True, alpha=0.25)
 
-    leg_fs = args.legend_fontsize
-    if leg_fs is None:
-        leg = ax.legend(loc=str(args.legend_loc), frameon=False)
-    else:
-        leg = ax.legend(loc=str(args.legend_loc), frameon=False, fontsize=float(leg_fs))
+    leg = None
+    if show_curve_legend:
+        leg_fs = args.legend_fontsize
+        if leg_fs is None:
+            leg = ax.legend(loc=str(args.legend_loc), frameon=False)
+        else:
+            leg = ax.legend(loc=str(args.legend_loc), frameon=False, fontsize=float(leg_fs))
+
+    # System legend (positionable)
+    if any(systems):
+        handles: List[Line2D] = []
+        for ic in range(n_cases):
+            if not systems[ic]:
+                continue
+            sys_lab = _format_system_label(str(systems[ic]), str(args.system_format))
+            col = case_colors[ic % len(case_colors)]
+            handles.append(Line2D([0], [0], color=col, lw=lw, label=sys_lab))
+
+        fs = args.system_fontsize
+        if fs is None:
+            try:
+                fs = float(ax.yaxis.label.get_size()) * 1.15
+            except Exception:
+                fs = None
+
+        if leg is not None:
+            ax.add_artist(leg)
+
+        if system_bbox is None:
+            leg_sys = ax.legend(
+                handles=handles,
+                loc=str(args.system_loc),
+                frameon=False,
+                fontsize=fs,
+            )
+        else:
+            leg_sys = ax.legend(
+                handles=handles,
+                loc=str(args.system_loc),
+                bbox_to_anchor=system_bbox,
+                bbox_transform=ax.transAxes,
+                frameon=False,
+                fontsize=fs,
+            )
+        if leg_sys is not None:
+            for t in leg_sys.get_texts():
+                t.set_fontweight("bold")
 
     _apply_plot_style(ax, bold=not args.no_bold, sci_y=args.sci_y, ylog=args.ylog, legend=leg)
 

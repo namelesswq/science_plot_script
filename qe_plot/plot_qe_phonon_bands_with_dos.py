@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib import colors as mcolors
 from matplotlib.lines import Line2D
 
 
@@ -48,10 +49,25 @@ def _build_parser() -> argparse.ArgumentParser:
         )
     )
 
-    # Bands
-    p.add_argument("--freq", required=True, help="Path to *.freq.gp (matdyn band output)")
-    p.add_argument("--matdyn-in", required=True, help="Path to matdyn.in")
-    p.add_argument("--kpath", default=None, help="Path to KPATH.in (VASPKIT). If omitted, labels are guessed.")
+    # Bands (allow multiple datasets for comparison)
+    p.add_argument(
+        "--freq",
+        required=True,
+        nargs="+",
+        help="One or more *.freq.gp files (matdyn band output). If multiple are given, they are overlaid for comparison.",
+    )
+    p.add_argument(
+        "--matdyn-in",
+        required=True,
+        nargs="+",
+        help="One or more matdyn.in files. If a single file is given, it is reused for all datasets.",
+    )
+    p.add_argument(
+        "--kpath",
+        default=None,
+        nargs="+",
+        help="One or more KPATH.in files (VASPKIT). If omitted, labels are guessed. If a single file is given, it is reused.",
+    )
 
     p.add_argument(
         "--keep-jumps",
@@ -59,9 +75,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Keep the original x-axis jumps at discontinuities (default: compress jumps so segments meet at one x).",
     )
 
-    # DOS/PDOS
-    p.add_argument("--dos", required=True, help="Path to phonon DOS file (e.g. zr2sc.dos)")
-    p.add_argument("--scf-in", required=True, help="Path to QE scf input (used to map PDOS columns to atoms)")
+    # DOS/PDOS (allow multiple datasets for comparison)
+    p.add_argument(
+        "--dos",
+        required=True,
+        nargs="+",
+        help="One or more phonon DOS files (e.g. zr2sc.dos). If multiple are given, total DOS curves are compared.",
+    )
+    p.add_argument(
+        "--scf-in",
+        required=True,
+        nargs="+",
+        help="One or more QE scf inputs (used to map PDOS columns to atoms). If a single file is given, it is reused.",
+    )
+    p.add_argument(
+        "--dos-norm",
+        default=None,
+        nargs="+",
+        help=(
+            "Per-dataset integer normalization factors. Provide one per dataset, e.g. '--dos-norm 1 4'. "
+            "Each DOS/PDOS is divided by its factor after reading (useful for supercell->unit-cell). "
+            "If only one value is given, it is broadcast to all datasets. "
+            "Comma-separated tokens are also accepted (e.g. '--dos-norm 1,4')."
+        ),
+    )
 
     p.add_argument(
         "--group",
@@ -165,7 +202,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--system",
         default=None,
-        help="System label shown as a small legend entry on the bands panel (e.g. 'Zr2SeC').",
+        nargs="+",
+        help=(
+            "System label(s) used as curve labels (bands and total DOS). "
+            "Provide one per dataset, e.g. '--system Zr2SC Zr15S8C8'. "
+            "If only one label is given, it is broadcast. Comma-separated tokens are also accepted."
+        ),
     )
     p.add_argument(
         "--system-format",
@@ -183,6 +225,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--system-loc",
         default="upper left",
         help="Legend location for --system (matplotlib legend loc). Default: upper left.",
+    )
+
+    p.add_argument(
+        "--system-bbox",
+        default=None,
+        help=(
+            "Optional legend anchor (bbox_to_anchor) in axes coordinates 'x,y' (e.g. '1.02,1.0' for outside right). "
+            "If provided, legend placement uses both --system-loc and this anchor."
+        ),
     )
 
     return p
@@ -204,6 +255,13 @@ def _parse_figsize(s: Optional[str]) -> Optional[Tuple[float, float]]:
     if w <= 0 or h <= 0:
         raise SystemExit(f"Invalid --figsize {s!r}: width and height must be > 0")
     return w, h
+
+
+def _parse_xy(s: Optional[str]) -> Optional[Tuple[float, float]]:
+    if not s:
+        return None
+    a, b = str(s).split(",", 1)
+    return float(a), float(b)
 
 
 def _parse_ratios(s: str) -> Tuple[float, float]:
@@ -247,6 +305,73 @@ def _format_system_label(label: str, mode: str) -> str:
     return re.sub(r"(?<=[A-Za-z\)])(\d+)", r"$_{\1}$", label)
 
 
+def _parse_csv_list(s: Optional[str]) -> Optional[List[str]]:
+    if s is None:
+        return None
+    parts = [x.strip() for x in str(s).split(",") if x.strip()]
+    return parts if parts else None
+
+
+def _flatten_tokens(tokens: Optional[Sequence[str]]) -> Optional[List[str]]:
+    """Flatten a list of tokens, splitting comma-separated items.
+
+    Accepts both:
+    - ['1', '4']
+    - ['1,4']
+    - ['Zr2SC,Zr15S8C8']
+    """
+
+    if tokens is None:
+        return None
+    out: List[str] = []
+    for tok in tokens:
+        for part in str(tok).split(","):
+            p = part.strip()
+            if p:
+                out.append(p)
+    return out if out else None
+
+
+def _parse_csv_ints(s: Optional[str]) -> Optional[List[int]]:
+    parts = _parse_csv_list(s)
+    if parts is None:
+        return None
+    out: List[int] = []
+    for p in parts:
+        try:
+            v = int(p)
+        except ValueError as e:
+            raise SystemExit(f"Invalid --dos-norm entry {p!r}: must be integer") from e
+        if v <= 0:
+            raise SystemExit(f"Invalid --dos-norm entry {p!r}: must be > 0")
+        out.append(v)
+    return out
+
+
+def _parse_int_list(tokens: Optional[Sequence[str]], *, opt_name: str) -> Optional[List[int]]:
+    flat = _flatten_tokens(tokens)
+    if flat is None:
+        return None
+    out: List[int] = []
+    for p in flat:
+        try:
+            v = int(p)
+        except ValueError as e:
+            raise SystemExit(f"Invalid {opt_name} entry {p!r}: must be integer") from e
+        if v <= 0:
+            raise SystemExit(f"Invalid {opt_name} entry {p!r}: must be > 0")
+        out.append(v)
+    return out
+
+
+def _broadcast_list(name: str, values: Sequence, n: int) -> List:
+    if len(values) == n:
+        return list(values)
+    if len(values) == 1 and n > 1:
+        return [values[0]] * n
+    raise SystemExit(f"Length mismatch for {name}: got {len(values)}, expected 1 or {n}")
+
+
 def _read_freq_gp(path: str) -> Tuple[np.ndarray, np.ndarray]:
     data = np.loadtxt(path)
     if data.ndim != 2 or data.shape[1] < 2:
@@ -283,7 +408,14 @@ def _read_matdyn_in_qpoints(path: str) -> List[KPointSpec]:
     try:
         nq = int(lines[j].strip().split()[0])
     except ValueError as e:
-        raise SystemExit(f"Cannot parse q-point count in {path}: {lines[j]!r}") from e
+        hint = ""
+        low = str(path).lower()
+        if low.endswith(".gp") or "freq" in low:
+            hint = (
+                "\nHint: --matdyn-in expects a QE matdyn input file (matdyn.in). "
+                "It looks like you may have passed a *.freq.gp file by mistake."
+            )
+        raise SystemExit(f"Cannot parse q-point count in {path}: {lines[j]!r}{hint}") from e
 
     specs: List[KPointSpec] = []
     j += 1
@@ -471,6 +603,67 @@ def _build_ticks_and_labels(
         xlabels2.append(lab)
 
     return xticks2, xlabels2
+
+
+def _map_x_to_reference(
+    x: np.ndarray,
+    indices: Sequence[int],
+    x_ref: np.ndarray,
+    indices_ref: Sequence[int],
+) -> np.ndarray:
+    """Map x to the reference axis by piecewise linear mapping between high-symmetry points.
+
+    This enables overlaying multiple datasets even if their internal x coordinates differ,
+    as long as they share the same *sequence* of high-symmetry points.
+    """
+
+    x = np.asarray(x, dtype=float)
+    x_ref = np.asarray(x_ref, dtype=float)
+    if len(indices) != len(indices_ref):
+        raise SystemExit(
+            "Cannot overlay multiple datasets: number of high-symmetry points differs "
+            f"({len(indices)} vs {len(indices_ref)})."
+        )
+
+    x_m = np.empty_like(x, dtype=float)
+    x_m.fill(np.nan)
+
+    for i in range(len(indices) - 1):
+        s = int(indices[i])
+        t = int(indices[i + 1])
+        sr = int(indices_ref[i])
+        tr = int(indices_ref[i + 1])
+        if s < 0 or t < 0 or sr < 0 or tr < 0:
+            continue
+        if t <= s or tr <= sr:
+            continue
+        if s >= len(x) or t >= len(x) or sr >= len(x_ref) or tr >= len(x_ref):
+            continue
+
+        denom = float(x[t] - x[s])
+        if abs(denom) < 1e-14:
+            x_m[s : t + 1] = float(x_ref[sr])
+            continue
+
+        frac = (x[s : t + 1] - float(x[s])) / denom
+        x_m[s : t + 1] = float(x_ref[sr]) + frac * (float(x_ref[tr]) - float(x_ref[sr]))
+
+    # Fill any leftover NaNs by nearest valid value (should be rare)
+    if np.any(~np.isfinite(x_m)):
+        good = np.isfinite(x_m)
+        if not np.any(good):
+            raise SystemExit("Failed to map x-axis for overlay: no finite mapped points")
+        idx = np.where(good)[0]
+        first = int(idx[0])
+        last = int(idx[-1])
+        x_m[:first] = x_m[first]
+        x_m[last + 1 :] = x_m[last]
+        # linear interpolate in between
+        bad = ~good
+        if np.any(bad):
+            x_m[bad] = np.interp(np.where(bad)[0], np.where(good)[0], x_m[good])
+
+    return x_m
 
 
 def _find_overlapping_xticklabels(fig: plt.Figure, ax: plt.Axes) -> List[int]:
@@ -675,6 +868,7 @@ def main() -> None:
     figsize_bands = _parse_figsize(args.figsize_bands)
     figsize_dos = _parse_figsize(args.figsize_dos)
     ratios = _parse_ratios(args.ratios)
+    system_bbox = _parse_xy(args.system_bbox)
 
     if args.lw is not None and float(args.lw) <= 0:
         raise SystemExit("--lw must be > 0")
@@ -682,86 +876,39 @@ def main() -> None:
     if args.style == "prb":
         _apply_scienceplots_prb_style()
 
-    # --- Bands data ---
-    x_path, ymat_cm1 = _read_freq_gp(args.freq)
-    ymat = _convert_freq_units(ymat_cm1, args.unit)
-    specs = _read_matdyn_in_qpoints(args.matdyn_in)
+    # --- Multi-dataset setup ---
+    freq_paths = list(args.freq)
+    matdyn_paths = list(args.matdyn_in)
+    dos_paths = list(args.dos)
+    scf_paths = list(args.scf_in)
+    kpath_paths = list(args.kpath) if args.kpath is not None else []
 
-    label_entries: Optional[List[Tuple[Tuple[float, float, float], str]]] = None
-    if args.kpath:
-        label_entries = _read_kpath_labels(args.kpath)
+    norms_in = _parse_int_list(args.dos_norm, opt_name="--dos-norm")
+    systems_in = _flatten_tokens(args.system)
 
-    hs_labels: List[str] = []
-    for i, sp in enumerate(specs):
-        lab = None
-        if label_entries is not None:
-            lab = _find_label_for_q(sp.q, label_entries)
-        if lab is None:
-            lab = f"Q{i+1}"
-        hs_labels.append(lab)
-
-    indices, scheme = _infer_indices(specs, n_data=len(x_path))
-    segments = _build_segments(specs, indices)
-
-    if args.keep_jumps:
-        x_plot = x_path
-    else:
-        x_plot = _compress_x_jumps_by_specs(x_path, specs, indices)
-
-    xticks, xticklabels = _build_ticks_and_labels(x_plot, specs, indices, hs_labels)
-
-    # --- DOS/PDOS data ---
-    freq_dos_cm1, dos_tot, pdos_mat = _read_phonon_dos_table(args.dos)
-    nat_from_scf = _read_nat_from_scf_in(args.scf_in)
-    atoms = _read_atoms_from_scf_in(args.scf_in, expected_nat=nat_from_scf)
-
-    n_atoms = nat_from_scf if nat_from_scf is not None else len(atoms)
-    if pdos_mat.shape[1] != 0 and pdos_mat.shape[1] != n_atoms:
-        raise SystemExit(
-            f"PDOS column count mismatch: DOS file has {pdos_mat.shape[1]} per-atom columns, "
-            f"but scf.in has {n_atoms} atoms. Please confirm the DOS file format/order."
-        )
-
-    freq_dos = _convert_freq_units(freq_dos_cm1, args.unit)
-
-    # Keep DOS/PDOS unit consistent with selected x unit (THz)
-    dos_tot, pdos_mat = _convert_dos_unit_for_x(
-        dos_tot,
-        pdos_mat,
-        x_unit=str(args.unit),
-        disable_jacobian=bool(args.no_jacobian),
+    n_cases = max(
+        len(freq_paths),
+        len(matdyn_paths),
+        len(dos_paths),
+        len(scf_paths),
+        len(kpath_paths) if kpath_paths else 1,
     )
 
-    elements_filter: Optional[set[str]] = None
-    if args.elements:
-        elements_filter = {x.strip() for x in args.elements.split(",") if x.strip()}
-
-    series: Dict[str, np.ndarray] = {}
-    labels: List[str] = []
-
-    if pdos_mat.shape[1] == 0:
-        pass
-    elif args.group == "atom":
-        selected_atoms = _parse_atom_selection(args.atoms, n_atoms=n_atoms)
-        for ia in selected_atoms:
-            el = atoms[ia - 1].element
-            if elements_filter is not None and el not in elements_filter:
-                continue
-            lab = f"{el}{ia}"
-            series[lab] = pdos_mat[:, ia - 1]
-            labels.append(lab)
+    freq_paths = _broadcast_list("--freq", freq_paths, n_cases)
+    matdyn_paths = _broadcast_list("--matdyn-in", matdyn_paths, n_cases)
+    dos_paths = _broadcast_list("--dos", dos_paths, n_cases)
+    scf_paths = _broadcast_list("--scf-in", scf_paths, n_cases)
+    if kpath_paths:
+        kpath_paths = _broadcast_list("--kpath", kpath_paths, n_cases)
     else:
-        by_el: Dict[str, np.ndarray] = {}
-        for ia, atom in enumerate(atoms, start=1):
-            el = atom.element
-            if elements_filter is not None and el not in elements_filter:
-                continue
-            if el not in by_el:
-                by_el[el] = np.zeros_like(dos_tot, dtype=float)
-            by_el[el] += pdos_mat[:, ia - 1]
-        for el in sorted(by_el.keys()):
-            series[el] = by_el[el]
-            labels.append(el)
+        kpath_paths = [None] * n_cases
+
+    norms = _broadcast_list("--dos-norm", norms_in or [1], n_cases)
+
+    if systems_in is None:
+        systems = [Path(p).stem for p in dos_paths]
+    else:
+        systems = _broadcast_list("--system", systems_in, n_cases)
 
     # --- Figure layout ---
     if (figsize_bands is None) ^ (figsize_dos is None):
@@ -789,78 +936,271 @@ def main() -> None:
 
     lw = float(args.lw) if args.lw is not None else (0.8 if args.style == "prb" else 1.4)
 
-    # --- Plot phonon bands ---
-    n_branch = int(ymat.shape[1])
-    for j in range(n_branch):
-        f = ymat[:, j]
-        for (s, t) in segments:
-            ax_band.plot(x_plot[s : t + 1], f[s : t + 1], color="black", lw=lw)
+    # --- Load & plot each dataset ---
+    ref_xticks: Optional[List[float]] = None
+    ref_xticklabels: Optional[List[str]] = None
+    ref_xlim: Optional[Tuple[float, float]] = None
+    ref_x_plot: Optional[np.ndarray] = None
+    ref_indices: Optional[List[int]] = None
+    ref_scheme: Optional[str] = None
+    ref_n_data: Optional[int] = None
 
-    for xpos in xticks:
-        ax_band.axvline(xpos, color="black", lw=0.6, alpha=0.6)
-
-    ax_band.set_xticks(xticks)
-    ax_band.set_xticklabels(xticklabels)
-    # Keep only high-symmetry vertical lines on x-axis; hide tick marks (but keep labels).
-    ax_band.tick_params(axis="x", which="both", bottom=False, top=False, length=0)
-
-    if args.system:
-        sys_lab = _format_system_label(str(args.system), str(args.system_format))
-        h = Line2D([], [], color="none", label=sys_lab)
-        fs = args.system_fontsize
-        if fs is None:
-            try:
-                fs = float(ax_band.yaxis.label.get_size()) * 1.15
-            except Exception:
-                fs = None
-        leg_sys = ax_band.legend(
-            handles=[h],
-            loc=str(args.system_loc),
-            frameon=False,
-            handlelength=0,
-            handletextpad=0.0,
-            borderaxespad=0.2,
-            fontsize=fs,
-        )
-        if leg_sys is not None:
-            for t in leg_sys.get_texts():
-                t.set_fontweight("bold")
-
-    ax_band.set_xlim(float(x_plot[0]), float(x_plot[-1]))
-    if ylim:
-        ax_band.set_ylim(*ylim)
-
-    ylab = "Frequency (THz)" if args.unit == "THz" else "Frequency (cm^-1)"
-    ax_band.set_ylabel(ylab)
-
-    # --- Plot rotated DOS/PDOS (x = DOS, y = Frequency) ---
-    ax_dos.plot(dos_tot, freq_dos, color="black", lw=lw, label="Total")
-
-    color_cycle = [
+    # High-contrast dataset colors (bands + total DOS): black, red, blue, ...
+    # These are intentionally easy to tell apart in print.
+    case_colors = [
+        "black",
         "tab:red",
         "tab:blue",
         "tab:green",
         "tab:orange",
         "tab:purple",
         "tab:brown",
-        "tab:pink",
         "tab:cyan",
+        "tab:pink",
         "tab:olive",
         "tab:gray",
     ]
-    for i, lab in enumerate(labels):
-        ax_dos.plot(series[lab], freq_dos, lw=lw, color=color_cycle[i % len(color_cycle)], label=lab)
+
+    # PDOS is plotted for both single and multi-dataset mode.
+    # In multi-dataset mode, element/atom colors are shared while datasets differ by linestyle.
+    plot_pdos = True
+    if n_cases > 1:
+        print(f"Detected {n_cases} datasets. Total DOS and PDOS are plotted on the right panel.")
+
+    # Data containers for DOS panel
+    dos_curves: List[Tuple[np.ndarray, np.ndarray, str, str]] = []  # (dos, freq, color, label)
+    pdos_cases: List[Tuple[np.ndarray, Dict[str, np.ndarray], str]] = []  # (freq, {base_label:pdos}, system_label)
+
+    for ic in range(n_cases):
+        freq_path = str(freq_paths[ic])
+        matdyn_path = str(matdyn_paths[ic])
+        dos_path = str(dos_paths[ic])
+        scf_path = str(scf_paths[ic])
+        kpath_path = kpath_paths[ic]
+        norm = int(norms[ic])
+
+        # --- Bands data ---
+        x_path, ymat_cm1 = _read_freq_gp(freq_path)
+        ymat = _convert_freq_units(ymat_cm1, args.unit)
+        specs = _read_matdyn_in_qpoints(matdyn_path)
+
+        label_entries: Optional[List[Tuple[Tuple[float, float, float], str]]] = None
+        if kpath_path:
+            label_entries = _read_kpath_labels(str(kpath_path))
+
+        hs_labels: List[str] = []
+        for i, sp in enumerate(specs):
+            lab = None
+            if label_entries is not None:
+                lab = _find_label_for_q(sp.q, label_entries)
+            if lab is None:
+                lab = f"Q{i+1}"
+            hs_labels.append(lab)
+
+        indices, scheme = _infer_indices(specs, n_data=len(x_path))
+        segments = _build_segments(specs, indices)
+
+        if args.keep_jumps:
+            x_plot = x_path
+        else:
+            x_plot = _compress_x_jumps_by_specs(x_path, specs, indices)
+
+        xticks, xticklabels = _build_ticks_and_labels(x_plot, specs, indices, hs_labels)
+
+        if ref_xticks is None:
+            ref_xticks = xticks
+            ref_xticklabels = xticklabels
+            ref_xlim = (float(x_plot[0]), float(x_plot[-1]))
+            ref_x_plot = np.asarray(x_plot, dtype=float)
+            ref_indices = list(indices)
+            ref_scheme = scheme
+            ref_n_data = len(x_path)
+        else:
+            if len(xticklabels) != len(ref_xticklabels):
+                raise SystemExit("Cannot overlay multiple datasets: high-symmetry tick count differs.")
+            if any(a != b for a, b in zip(xticklabels, ref_xticklabels)):
+                raise SystemExit("Cannot overlay multiple datasets: high-symmetry labels differ.")
+
+        # Map this dataset's x to the reference axis (so different structures can be compared).
+        if ref_x_plot is None or ref_indices is None:
+            x_mapped = np.asarray(x_plot, dtype=float)
+        else:
+            x_mapped = _map_x_to_reference(x_plot, indices, ref_x_plot, ref_indices)
+
+        col = case_colors[ic % len(case_colors)]
+        alpha = 1.0 if ic == 0 else 0.65
+
+        n_branch = int(ymat.shape[1])
+        for j in range(n_branch):
+            f = ymat[:, j]
+            for (s, t) in segments:
+                ax_band.plot(x_mapped[s : t + 1], f[s : t + 1], color=col, lw=lw, alpha=alpha)
+
+        # --- DOS/PDOS data ---
+        freq_dos_cm1, dos_tot, pdos_mat = _read_phonon_dos_table(dos_path)
+        nat_from_scf = _read_nat_from_scf_in(scf_path)
+        atoms = _read_atoms_from_scf_in(scf_path, expected_nat=nat_from_scf)
+
+        n_atoms = nat_from_scf if nat_from_scf is not None else len(atoms)
+        if pdos_mat.shape[1] != 0 and pdos_mat.shape[1] != n_atoms:
+            raise SystemExit(
+                f"PDOS column count mismatch for {dos_path!r}: DOS file has {pdos_mat.shape[1]} per-atom columns, "
+                f"but scf.in has {n_atoms} atoms ({scf_path!r})."
+            )
+
+        freq_dos = _convert_freq_units(freq_dos_cm1, args.unit)
+        dos_tot, pdos_mat = _convert_dos_unit_for_x(
+            dos_tot,
+            pdos_mat,
+            x_unit=str(args.unit),
+            disable_jacobian=bool(args.no_jacobian),
+        )
+
+        # Per-dataset normalization (e.g. supercell -> per unit cell)
+        if norm != 1:
+            dos_tot = dos_tot / float(norm)
+            pdos_mat = pdos_mat / float(norm)
+
+        sys_lab = _format_system_label(str(systems[ic]), str(args.system_format))
+        dos_curves.append((dos_tot, freq_dos, col, sys_lab))
+
+        if plot_pdos:
+            elements_filter: Optional[set[str]] = None
+            if args.elements:
+                elements_filter = {x.strip() for x in args.elements.split(",") if x.strip()}
+
+            series_case: Dict[str, np.ndarray] = {}
+            if pdos_mat.shape[1] == 0:
+                series_case = {}
+            elif args.group == "atom":
+                selected_atoms = _parse_atom_selection(args.atoms, n_atoms=n_atoms)
+                for ia in selected_atoms:
+                    el = atoms[ia - 1].element
+                    if elements_filter is not None and el not in elements_filter:
+                        continue
+                    base_lab = f"{el}{ia}"
+                    series_case[base_lab] = pdos_mat[:, ia - 1]
+            else:
+                by_el: Dict[str, np.ndarray] = {}
+                for ia, atom in enumerate(atoms, start=1):
+                    el = atom.element
+                    if elements_filter is not None and el not in elements_filter:
+                        continue
+                    if el not in by_el:
+                        by_el[el] = np.zeros_like(dos_tot, dtype=float)
+                    by_el[el] += pdos_mat[:, ia - 1]
+                for el in sorted(by_el.keys()):
+                    series_case[el] = by_el[el]
+
+            pdos_cases.append((freq_dos, series_case, sys_lab))
+
+    if ref_xticks is None or ref_xticklabels is None or ref_xlim is None:
+        raise SystemExit("No dataset loaded")
+
+    for xpos in ref_xticks:
+        ax_band.axvline(xpos, color="black", lw=0.6, alpha=0.6)
+
+    ax_band.set_xticks(ref_xticks)
+    ax_band.set_xticklabels(ref_xticklabels)
+    # Keep only high-symmetry vertical lines on x-axis; hide tick marks (but keep labels).
+    ax_band.tick_params(axis="x", which="both", bottom=False, top=False, length=0)
+
+    ax_band.set_xlim(*ref_xlim)
+    if ylim:
+        ax_band.set_ylim(*ylim)
+
+    ylab = "Frequency (THz)" if args.unit == "THz" else "Frequency (cm^-1)"
+    ax_band.set_ylabel(ylab)
+
+    # System legend (single or multi-dataset)
+    if systems:
+        handles: List[Line2D] = []
+        for ic in range(n_cases):
+            sys_lab = _format_system_label(str(systems[ic]), str(args.system_format))
+            col = case_colors[ic % len(case_colors)]
+            handles.append(Line2D([0], [0], color=col, lw=lw, label=sys_lab))
+
+        fs = args.system_fontsize
+        if fs is None:
+            try:
+                fs = float(ax_band.yaxis.label.get_size()) * 1.15
+            except Exception:
+                fs = None
+
+        if system_bbox is None:
+            leg_sys = ax_band.legend(
+                handles=handles,
+                loc=str(args.system_loc),
+                frameon=False,
+                fontsize=fs,
+            )
+        else:
+            leg_sys = ax_band.legend(
+                handles=handles,
+                loc=str(args.system_loc),
+                bbox_to_anchor=system_bbox,
+                bbox_transform=ax_band.transAxes,
+                frameon=False,
+                fontsize=fs,
+            )
+        if leg_sys is not None:
+            for t in leg_sys.get_texts():
+                t.set_fontweight("bold")
+
+    # --- Plot rotated DOS/PDOS (x = DOS, y = Frequency) ---
+    # Total DOS curves for each dataset
+    for dos_tot, freq_dos, col, _lab in dos_curves:
+        ax_dos.plot(dos_tot, freq_dos, color=col, lw=lw, label=_lab)
+
+    # PDOS colors: every PDOS curve gets its own color (even across datasets),
+    # and PDOS colors must not collide with total DOS colors.
+    # Use the second half of tab20 (lighter variants) for better separation.
+    def _rgba_key(c: object) -> Tuple[float, float, float, float]:
+        r, g, b, a = mcolors.to_rgba(c)
+        return (round(float(r), 4), round(float(g), 4), round(float(b), 4), round(float(a), 4))
+
+    used_total_rgba = {_rgba_key(col) for (_dos, _freq, col, _lab) in dos_curves}
+    tab20 = list(plt.get_cmap("tab20").colors)
+    pdos_pool = tab20[10:] + tab20[:10]
+    color_cycle = [c for c in pdos_pool if _rgba_key(c) not in used_total_rgba]
+    if not color_cycle:
+        color_cycle = list(pdos_pool)
+
+    if plot_pdos:
+        next_color = 0
+        for ic, (freq_dos, series_case, sys_lab) in enumerate(pdos_cases):
+            if not series_case:
+                continue
+            for base_lab in sorted(series_case.keys()):
+                col = color_cycle[next_color % len(color_cycle)]
+                next_color += 1
+                lab = f"{sys_lab}:{base_lab}"
+                ax_dos.plot(series_case[base_lab], freq_dos, lw=lw, color=col, ls="-", label=lab)
 
     if dos_xlim:
         ax_dos.set_xlim(*dos_xlim)
     else:
-        if ylim:
-            mask = (freq_dos >= ylim[0]) & (freq_dos <= ylim[1])
-        else:
-            mask = slice(None)
-        xmax = float(np.nanmax(dos_tot[mask])) if len(dos_tot) else 0.0
-        for lab in labels:
-            xmax = max(xmax, float(np.nanmax(series[lab][mask])))
+        y0, y1 = ax_dos.get_ylim()
+        if y0 > y1:
+            y0, y1 = y1, y0
+        xmax = 0.0
+        for dos_tot, freq_arr, _col, _lab in dos_curves:
+            if len(dos_tot) and len(freq_arr) == len(dos_tot):
+                m = (freq_arr >= y0) & (freq_arr <= y1)
+                if np.any(m):
+                    xmax = max(xmax, float(np.nanmax(dos_tot[m])))
+        if plot_pdos:
+            for freq_arr, series_case, _sys_lab in pdos_cases:
+                if not series_case:
+                    continue
+                m = (freq_arr >= y0) & (freq_arr <= y1)
+                if not np.any(m):
+                    continue
+                for base_lab, arr in series_case.items():
+                    try:
+                        xmax = max(xmax, float(np.nanmax(arr[m])))
+                    except Exception:
+                        continue
         ax_dos.set_xlim(0.0, xmax * 1.05 if xmax > 0 else 1.0)
 
     # Hide duplicate y tick labels on the right
@@ -877,11 +1217,13 @@ def main() -> None:
         pass
     ax_dos.tick_params(axis="x", which="both", bottom=True, top=False, labelbottom=True)
 
-    leg_fs = args.legend_fontsize
-    if leg_fs is None:
-        leg = ax_dos.legend(loc=str(args.legend_loc), frameon=False)
-    else:
-        leg = ax_dos.legend(loc=str(args.legend_loc), frameon=False, fontsize=float(leg_fs))
+    leg = None
+    if plot_pdos:
+        leg_fs = args.legend_fontsize
+        if leg_fs is None:
+            leg = ax_dos.legend(loc=str(args.legend_loc), frameon=False)
+        else:
+            leg = ax_dos.legend(loc=str(args.legend_loc), frameon=False, fontsize=float(leg_fs))
 
     if args.style == "default":
         ax_band.grid(True, alpha=0.25)
@@ -901,7 +1243,9 @@ def main() -> None:
     fig.savefig(args.out, dpi=300)
 
     print(f"Saved: {args.out}")
-    print(f"Q-point indexing convention: {scheme} (data points per branch: {len(x_path)})")
+    if ref_scheme is not None:
+        ndata = ref_n_data if ref_n_data is not None else "?"
+        print(f"Q-point indexing convention: {ref_scheme} (data points per branch: {ndata})")
 
     if args.show:
         plt.show()

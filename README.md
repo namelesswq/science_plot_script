@@ -55,8 +55,29 @@ python qe_plot/plot_qe_dos_pdos_overlay.py \
   --merge-wfc \
   --fermi 14.776 \
   --fermi-line \
+  --system Zr2SC \
+  --system-fontsize 12 \
+  --system-bbox 0,0.75 \
   --xlim -5,5 \
   --out dos_pdos.png
+```
+
+多体系对比示例（多组总 DOS + PDOS 叠加；每组可有自己的 fermi 与 PDOS glob）：
+
+```bash
+python qe_plot/plot_qe_dos_pdos_overlay.py \
+  --tot prim/zr2sc.pdos.pdos_tot sc222/zr2sc.pdos.pdos_tot \
+  --pdos-glob 'prim/zr2sc.pdos.pdos_atm#*' 'sc222/zr2sc.pdos.pdos_atm#*' \
+  --elements Zr,S,C \
+  --orbitals s,p,d \
+  --merge-wfc \
+  --fermi 14.776,14.812 \
+  --fermi-line \
+  --system Zr2SC,2x2x2 \
+  --system-fontsize 12 \
+  --system-bbox 0,0.75 \
+  --xlim -5,5 \
+  --out dos_pdos_compare.png
 ```
 
 常用参数：
@@ -66,6 +87,7 @@ python qe_plot/plot_qe_dos_pdos_overlay.py \
 - `--n0 'Zr=4,S=3,C=2'`：不合并 wfc 时，把 `wfc#` 重新标成“主量子数标签”（如 Zr-4d、Zr-5d…）
 - `--tot-col` / `--pdos-col`：指定读哪一列（0-based；默认都取第 2 列即 `col=1`）
 - `--style prb|default`、`--figsize 3.4,2.6`、`--ylog`、`--sci-y auto|on|off`
+- `--system` / `--system-format chem|raw` / `--system-fontsize` / `--system-loc` / `--system-bbox x,y`：在图内标注体系名称（`--system-bbox` 用轴坐标 0~1 精确定位）
 
 ---
 
@@ -90,14 +112,35 @@ python qe_plot/plot_qe_bands.py \
   --ylim -5,5 \
   --system Zr2SC \
   --system-fontsize 14 \
+  --system-bbox 0,0.75 \
   --lw 0.6 \
   --out bands.png
 ```
 
+多体系对比示例（两套能带叠加对比；脚本会按高对称点分段线性映射把 x 轴对齐到第一套数据）：
+
+```bash
+python qe_plot/plot_qe_bands.py \
+  --bands prim/bands.out.gnu sc222/bands.out.gnu \
+  --band-in prim/band.in sc222/band.in \
+  --kpath KPATH.in \
+  --fermi 14.776,14.812 \
+  --fermi-line \
+  --ylim -5,5 \
+  --system Zr2SC,2x2x2 \
+  --system-fontsize 14 \
+  --system-bbox 0,0.75 \
+  --lw 0.6 \
+  --out bands_compare.png
+```
+
+说明：多体系叠加要求“高对称点标签序列一致”（例如都是 `Γ-X-M-Γ` 且断点位置一致）；否则脚本会报错提示。
+
 说明：
 - 当 `band.in` 中某行 `N=1` 时，该位置视作不连续点：刻度标签会被合并成 `A|L`（终点|起点），且能带不会跨越该点连线。
 - x 轴只保留高对称点处的竖线（`axvline`），不再显示刻度短线；高对称点标签仍会显示。
-- 可用 `--system` 在左上角等位置标注体系名称（默认会把化学式中的数字渲染为下标，如 `Zr2SC → Zr$_{2}$SC`）；若不想下标，用 `--system-format raw`。
+- 可用 `--system` 在图内标注体系名称（默认会把化学式中的数字渲染为下标，如 `Zr2SC → Zr$_{2}$SC`）；若不想下标，用 `--system-format raw`。
+- 体系标注位置：用 `--system-loc` 选大致方位；如需精确摆放（或放到图外），用 `--system-bbox x,y`（轴坐标系 0~1），例如 `--system-bbox 1.02,1.0`。
 
 ---
 
@@ -129,15 +172,45 @@ python qe_plot/plot_qe_bands_with_pdos.py \
   --legend-loc best \
   --system Zr2SC \
   --system-fontsize 14 \
+  --system-bbox 0,0.75 \
   --lw 0.6 \
   --out bands_pdos.png
 ```
+
+多体系对比示例（两套“能带 + (P)DOS”合图叠加；bands/total DOS 用黑/红/蓝…区分体系，PDOS 用全局唯一色池）：
+
+```bash
+python qe_plot/plot_qe_bands_with_pdos.py \
+  --bands prim/bands.out.gnu sc222/bands.out.gnu \
+  --band-in prim/band.in sc222/band.in \
+  --kpath KPATH.in \
+  --tot prim/zr2sc.pdos.pdos_tot sc222/zr2sc.pdos.pdos_tot \
+  --pdos-glob 'prim/zr2sc.pdos.pdos_atm#*' 'sc222/zr2sc.pdos.pdos_atm#*' \
+  --elements Zr,S,C \
+  --orbitals s,p,d \
+  --merge-wfc \
+  --fermi 14.776,14.812 \
+  --fermi-line \
+  --ylim -5,5 \
+  --figsize-bands 7,3 \
+  --figsize-dos 1.8,3 \
+  --legend-fontsize 7 \
+  --legend-loc best \
+  --system Zr2SC,2x2x2 \
+  --system-fontsize 14 \
+  --system-bbox 0,0.75 \
+  --lw 0.6 \
+  --out bands_pdos_compare.png
+```
+
+说明：
+- 多体系模式下不支持用 `--pdos` 直接给“所有 PDOS 文件列表”（无法自动分组）；请用每套一个 `--pdos-glob`，或依赖脚本对每个 `--tot` 的自动推断。
 
 常用参数：
 - `--dos-xlim xmin,xmax`：限制右侧 DOS 轴范围
 - `--ratios 3,1`：面板宽度比（若没用 `--figsize-bands/--figsize-dos`，可用这个快速调比例）
 - `--n0`、`--tot-col`、`--pdos-col`：同上
-- `--system` / `--system-format chem|raw` / `--system-fontsize` / `--system-loc`：在左侧能带面板用图例样式标注体系（默认 `chem` 会把化学式数字变下标）
+- `--system` / `--system-format chem|raw` / `--system-fontsize` / `--system-loc` / `--system-bbox x,y`：在左侧能带面板标注体系（`--system-bbox` 用轴坐标精确定位）
 
 ---
 
@@ -161,6 +234,7 @@ python qe_plot/plot_qe_phonon_bands.py \
   --ylim 0,8 \
   --system Zr2SC \
   --system-fontsize 14 \
+  --system-bbox 0,0.75 \
   --lw 0.6 \
   --figsize 7,3 \
   --out phonon_bands.png
@@ -172,6 +246,7 @@ python qe_plot/plot_qe_phonon_bands.py \
 - 高对称点标签若过密，脚本会只对“发生遮挡的少数标签”做处理（缩字号/最多 45°/两行错位），不遮挡的标签保持水平
 - x 轴只保留高对称点处的竖线（`axvline`），不再显示刻度短线；高对称点标签仍会显示。
 - 可用 `--system` 标注体系名称（默认会把化学式数字渲染为下标；不想下标用 `--system-format raw`）。
+- 体系标注位置：用 `--system-loc` 选方位；用 `--system-bbox x,y` 做精确定位（轴坐标 0~1）。
 
 ---
 
@@ -190,15 +265,34 @@ python qe_plot/plot_qe_phonon_dos_pdos.py \
   --dos zr2sc.dos \
   --scf-in scf.in \
   --group element \
+  --system Zr2SC \
+  --system-fontsize 12 \
+  --system-bbox 0,0.75 \
   --xlim 0,17.2 \
   --lw 0.6 \
   --figsize 6,3 \
   --out phonon_dos.png
 ```
 
+多组数据对比（例如：原胞 vs 2×2×2 超胞）。多组模式下默认只画 total DOS（不画 PDOS，避免曲线/图例过多）：
+
+```bash
+python qe_plot/plot_qe_phonon_dos_pdos.py \
+  --dos prim.dos sc222.dos \
+  --scf-in prim_scf.in sc222_scf.in \
+  --dos-norm 1,8 \
+  --labels prim,2x2x2 \
+  --xlim 0,17.2 \
+  --lw 0.6 \
+  --figsize 6,3 \
+  --out phonon_dos_compare.png
+```
+
 说明：
 - 默认 `--unit THz`：横轴 `cm^-1 → THz`（除以 `33.35641`）
 - 为保持单位一致，默认会对 DOS/PDOS 做雅可比缩放：`g(THz) = g(cm^-1) * 33.35641`（可用 `--no-jacobian` 关闭）
+- 可用 `--system` 在图内标注体系名称；位置用 `--system-loc` 或 `--system-bbox x,y` 精确控制（轴坐标 0~1）。
+- 多组对比时，可用 `--dos-norm 1,8,...` 为每组指定一个整数归一化因子（读取后分别除以该因子），常用于将超胞 DOS 换算到“每原胞”可比的量。
 - `--group atom` 时可用 `--atoms 1,2,5-8` 选原子；两种分组都可用 `--elements Zr,S` 过滤
 
 ---
@@ -225,19 +319,40 @@ python qe_plot/plot_qe_phonon_bands_with_dos.py \
   --ylim 0,8 \
   --system Zr2SC \
   --system-fontsize 14 \
+  --system-bbox 0,0.75 \
   --lw 0.6 \
   --figsize-bands 7,3 \
   --figsize-dos 2,3 \
   --out phonon_bands_dos.png
 ```
 
+多组对比（bands + total DOS）：
+
+```bash
+python qe_plot/plot_qe_phonon_bands_with_dos.py \
+  --freq prim.freq.gp sc222.freq.gp \
+  --matdyn-in prim_matdyn.in sc222_matdyn.in \
+  --kpath prim_KPATH.in sc222_KPATH.in \
+  --dos prim.dos sc222.dos \
+  --scf-in prim_scf.in sc222_scf.in \
+  --dos-norm 1,8 \
+  --system Zr2SC,Zr16S8C8 \
+  --unit THz \
+  --ylim 0,8 \
+  --lw 0.6 \
+  --figsize-bands 7,3 \
+  --figsize-dos 2,3 \
+  --out phonon_bands_dos_compare.png
+```
+
 说明：
 - 默认会压缩断点处的 x 轴跳跃空白；如需保留跳跃，用 `--keep-jumps`
 - 默认 `--unit THz`：频率 `cm^-1 → THz`（除以 `33.35641`）
 - 为保持单位一致，默认会对 DOS/PDOS 做雅可比缩放：`g(THz) = g(cm^-1) * 33.35641`（可用 `--no-jacobian` 关闭）
+- 多组对比时，可用 `--dos-norm 1,8,...` 为每组指定一个整数归一化因子（读取后分别除以该因子）；右侧面板默认只画 total DOS。
 - 右侧 DOS 面板与左侧共享频率 y 轴（DOS 在 x，频率在 y）
 - 左侧声子谱 x 轴只保留高对称点处的竖线，不再显示刻度短线；高对称点标签仍会显示。
-- `--system` / `--system-format chem|raw` / `--system-fontsize` / `--system-loc`：在左侧面板标注体系（默认 `chem` 下标渲染）。
+- `--system` / `--system-format chem|raw` / `--system-fontsize` / `--system-loc` / `--system-bbox x,y`：在左侧面板标注体系（`--system-bbox` 用轴坐标精确定位）。
 
 # Perturbo 绘图（perturbo_plot）
 

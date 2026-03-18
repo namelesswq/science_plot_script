@@ -44,15 +44,33 @@ def _build_parser() -> argparse.ArgumentParser:
         )
     )
 
-    p.add_argument("--bands", required=True, help="Path to bands.out.gnu")
-    p.add_argument("--band-in", required=True, help="Path to band.in (QE input with K_POINTS crystal_b)")
-    p.add_argument("--kpath", default=None, help="Path to KPATH.in (VASPKIT). If omitted, labels are guessed.")
+    p.add_argument(
+        "--bands",
+        required=True,
+        nargs="+",
+        help="One or more bands.out.gnu files. If multiple are given, they are overlaid for comparison.",
+    )
+    p.add_argument(
+        "--band-in",
+        required=True,
+        nargs="+",
+        help="One or more band.in files. If a single file is given, it is reused for all datasets.",
+    )
+    p.add_argument(
+        "--kpath",
+        default=None,
+        nargs="+",
+        help="One or more KPATH.in files (VASPKIT). If omitted, labels are guessed. If a single file is given, it is reused.",
+    )
 
     p.add_argument(
         "--fermi",
-        type=float,
         default=None,
-        help="Fermi energy in eV. If provided, shift energies as E -> E - Ef so Ef is at 0 eV.",
+        nargs="+",
+        help=(
+            "Fermi energy (eV). If provided, shift energies as E -> E - Ef so Ef is at 0 eV. "
+            "Provide one per dataset, or a single value to broadcast. Comma-separated tokens are accepted."
+        ),
     )
     p.add_argument("--fermi-line", action="store_true", help="Draw a horizontal line at E=0")
 
@@ -88,7 +106,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--system",
         default=None,
-        help="System label shown as a small legend entry (e.g. 'Zr2SeC').",
+        nargs="+",
+        help=(
+            "System label(s) used as curve labels. Provide one per dataset, e.g. '--system Zr2SC Zr15S8C8'. "
+            "If only one label is given, it is broadcast. Comma-separated tokens are also accepted."
+        ),
     )
     p.add_argument(
         "--system-format",
@@ -106,6 +128,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--system-loc",
         default="upper left",
         help="Legend location for --system (matplotlib legend loc). Default: upper left.",
+    )
+
+    p.add_argument(
+        "--system-bbox",
+        default=None,
+        help=(
+            "Optional legend anchor (bbox_to_anchor) in axes coordinates 'x,y' (e.g. '1.02,1.0' for outside right). "
+            "If provided, legend placement uses both --system-loc and this anchor."
+        ),
     )
 
     p.add_argument("--no-bold", action="store_true", help="Disable bold text in default style")
@@ -135,6 +166,90 @@ def _parse_figsize(s: Optional[str]) -> Optional[Tuple[float, float]]:
     if w <= 0 or h <= 0:
         raise SystemExit(f"Invalid --figsize {s!r}: width and height must be > 0")
     return w, h
+
+
+def _parse_xy(s: Optional[str]) -> Optional[Tuple[float, float]]:
+    if not s:
+        return None
+    a, b = str(s).split(",", 1)
+    return float(a), float(b)
+
+
+def _flatten_tokens(tokens: Optional[Sequence[str]]) -> List[str]:
+    if not tokens:
+        return []
+    out: List[str] = []
+    for t in tokens:
+        if t is None:
+            continue
+        for s in str(t).split(","):
+            s2 = s.strip()
+            if s2:
+                out.append(s2)
+    return out
+
+
+def _broadcast_list(xs: Sequence[str], n: int, name: str) -> List[str]:
+    if len(xs) == n:
+        return list(xs)
+    if len(xs) == 1:
+        return [str(xs[0])] * n
+    raise SystemExit(f"{name} expects 1 value or {n} values, but got {len(xs)}")
+
+
+def _parse_float_list(tokens: Optional[Sequence[str]], *, n: int, name: str) -> List[Optional[float]]:
+    flat = _flatten_tokens(tokens)
+    if not flat:
+        return [None] * n
+    flat = _broadcast_list(flat, n, name)
+    out: List[Optional[float]] = []
+    for t in flat:
+        if t is None or str(t).strip() == "":
+            out.append(None)
+            continue
+        try:
+            out.append(float(t))
+        except ValueError as e:
+            raise SystemExit(f"{name} contains non-float token {t!r}") from e
+    return out
+
+
+def _map_x_to_reference(
+    x_plot: np.ndarray,
+    indices: Sequence[int],
+    ref_x_plot: np.ndarray,
+    ref_indices: Sequence[int],
+) -> np.ndarray:
+    """Piecewise linear mapping of this dataset's x axis onto the reference x axis."""
+
+    x = np.asarray(x_plot, dtype=float)
+    x_ref = np.asarray(ref_x_plot, dtype=float)
+    if len(indices) != len(ref_indices):
+        raise SystemExit("Cannot overlay: high-symmetry point count differs.")
+
+    x2 = x.copy()
+    for i in range(len(indices) - 1):
+        a = int(indices[i])
+        b = int(indices[i + 1])
+        ra = int(ref_indices[i])
+        rb = int(ref_indices[i + 1])
+        if b <= a or rb <= ra:
+            continue
+        if a < 0 or b >= len(x2) or ra < 0 or rb >= len(x_ref):
+            continue
+
+        x0 = float(x[a])
+        x1 = float(x[b])
+        rx0 = float(x_ref[ra])
+        rx1 = float(x_ref[rb])
+
+        denom = (x1 - x0)
+        if abs(denom) < 1e-14:
+            x2[a : b + 1] = rx0
+            continue
+        scale = (rx1 - rx0) / denom
+        x2[a : b + 1] = rx0 + (x[a : b + 1] - x0) * scale
+    return x2
 
 
 def _apply_scienceplots_prb_style() -> None:
@@ -548,30 +663,34 @@ def main() -> None:
 
     ylim = _parse_lim(args.ylim)
     figsize = _parse_figsize(args.figsize)
+    system_bbox = _parse_xy(args.system_bbox)
 
-    # Load band data
-    x, bands = _read_bands_out_gnu(args.bands)
+    bands_paths = [str(x) for x in args.bands]
+    n_cases = len(bands_paths)
+    band_in_paths = _broadcast_list([str(x) for x in args.band_in], n_cases, "--band-in")
 
-    # Parse path specification and labels
-    specs = _read_band_in_kpoints(args.band_in)
+    kpath_paths: List[Optional[str]] = []
+    if args.kpath is None:
+        kpath_paths = [None] * n_cases
+    else:
+        kpath_paths = [str(x) for x in _broadcast_list([str(x) for x in args.kpath], n_cases, "--kpath")]
 
-    label_entries: Optional[List[Tuple[Tuple[float, float, float], str]]] = None
-    if args.kpath:
-        label_entries = _read_kpath_labels(args.kpath)
+    fermis = _parse_float_list(args.fermi, n=n_cases, name="--fermi")
 
-    labels: List[str] = []
-    for i, sp in enumerate(specs):
-        lab = None
-        if label_entries is not None:
-            lab = _find_label_for_k(sp.k, label_entries)
-        if lab is None:
-            # Fallback: try common special points
-            lab = f"K{i+1}"
-        labels.append(lab)
+    systems = _flatten_tokens(args.system)
+    if systems:
+        systems = _broadcast_list(systems, n_cases, "--system")
+    else:
+        systems = [""] * n_cases
 
-    indices, scheme = _infer_indices(specs, n_data=len(x))
-    segments = _build_segments(specs, indices)
-    xticks, xticklabels = _build_ticks_and_labels(x, specs, indices, labels)
+    # Reference axis (first dataset)
+    ref_xticks: Optional[List[float]] = None
+    ref_xticklabels: Optional[List[str]] = None
+    ref_xlim: Optional[Tuple[float, float]] = None
+    ref_x: Optional[np.ndarray] = None
+    ref_indices: Optional[List[int]] = None
+    ref_scheme: Optional[str] = None
+    ref_n_data: Optional[int] = None
 
     # Style
     if args.style == "prb":
@@ -586,43 +705,121 @@ def main() -> None:
         raise SystemExit("--lw must be > 0")
     lw_band = float(args.lw) if args.lw is not None else (1.0 if args.style == "prb" else 1.4)
 
-    # Energy shift
-    y_arrays = bands
-    if args.fermi is not None:
-        y_arrays = [b - float(args.fermi) for b in bands]
+    # High-contrast dataset colors: black, red, blue, ...
+    case_colors = [
+        "black",
+        "tab:red",
+        "tab:blue",
+        "tab:green",
+        "tab:orange",
+        "tab:purple",
+        "tab:brown",
+        "tab:cyan",
+        "tab:pink",
+        "tab:olive",
+        "tab:gray",
+    ]
 
-    # Plot each band as black solid lines, but break at jumps by plotting per-segment.
-    for e in y_arrays:
-        for (s, t) in segments:
-            ax.plot(x[s : t + 1], e[s : t + 1], color="black", lw=lw_band)
+    # --- Load & plot each dataset ---
+    for ic in range(n_cases):
+        x, bands = _read_bands_out_gnu(bands_paths[ic])
+        specs = _read_band_in_kpoints(band_in_paths[ic])
+
+        label_entries: Optional[List[Tuple[Tuple[float, float, float], str]]] = None
+        kp = kpath_paths[ic]
+        if kp:
+            label_entries = _read_kpath_labels(kp)
+
+        labels: List[str] = []
+        for i, sp in enumerate(specs):
+            lab = None
+            if label_entries is not None:
+                lab = _find_label_for_k(sp.k, label_entries)
+            if lab is None:
+                lab = f"K{i+1}"
+            labels.append(lab)
+
+        indices, scheme = _infer_indices(specs, n_data=len(x))
+        segments = _build_segments(specs, indices)
+        xticks, xticklabels = _build_ticks_and_labels(x, specs, indices, labels)
+
+        if ref_xticks is None:
+            ref_xticks = xticks
+            ref_xticklabels = xticklabels
+            ref_xlim = (float(x[0]), float(x[-1]))
+            ref_x = np.asarray(x, dtype=float)
+            ref_indices = list(indices)
+            ref_scheme = scheme
+            ref_n_data = len(x)
+        else:
+            if len(xticklabels) != len(ref_xticklabels):
+                raise SystemExit("Cannot overlay multiple datasets: high-symmetry tick count differs.")
+            if any(a != b for a, b in zip(xticklabels, ref_xticklabels)):
+                raise SystemExit("Cannot overlay multiple datasets: high-symmetry labels differ.")
+
+        # Map x to reference axis
+        if ref_x is None or ref_indices is None:
+            x_mapped = np.asarray(x, dtype=float)
+        else:
+            x_mapped = _map_x_to_reference(x, indices, ref_x, ref_indices)
+
+        # Energy shift per dataset
+        y_arrays = bands
+        ef = fermis[ic]
+        if ef is not None:
+            y_arrays = [b - float(ef) for b in bands]
+
+        col = case_colors[ic % len(case_colors)]
+        alpha = 1.0 if ic == 0 else 0.65
+        for e in y_arrays:
+            for (s, t) in segments:
+                ax.plot(x_mapped[s : t + 1], e[s : t + 1], color=col, lw=lw_band, alpha=alpha)
+
+    if ref_xticks is None or ref_xticklabels is None or ref_xlim is None:
+        raise SystemExit("No dataset loaded")
 
     # High-symmetry separators and ticks
-    for xpos in xticks:
+    for xpos in ref_xticks:
         ax.axvline(xpos, color="black", lw=0.6, alpha=0.6)
 
-    ax.set_xticks(xticks)
-    ax.set_xticklabels(xticklabels)
+    ax.set_xticks(ref_xticks)
+    ax.set_xticklabels(ref_xticklabels)
     # Keep only high-symmetry vertical lines on x-axis; hide tick marks (but keep labels).
     ax.tick_params(axis="x", which="both", bottom=False, top=False, length=0)
 
-    if args.system:
-        sys_lab = _format_system_label(str(args.system), str(args.system_format))
-        h = Line2D([], [], color="none", label=sys_lab)
+    # System legend: one entry per dataset
+    if any(systems):
+        handles: List[Line2D] = []
+        for ic in range(n_cases):
+            if not systems[ic]:
+                continue
+            sys_lab = _format_system_label(str(systems[ic]), str(args.system_format))
+            col = case_colors[ic % len(case_colors)]
+            handles.append(Line2D([0], [0], color=col, lw=lw_band, label=sys_lab))
+
         fs = args.system_fontsize
         if fs is None:
             try:
                 fs = float(ax.yaxis.label.get_size()) * 1.15
             except Exception:
                 fs = None
-        leg = ax.legend(
-            handles=[h],
-            loc=str(args.system_loc),
-            frameon=False,
-            handlelength=0,
-            handletextpad=0.0,
-            borderaxespad=0.2,
-            fontsize=fs,
-        )
+
+        if system_bbox is None:
+            leg = ax.legend(
+                handles=handles,
+                loc=str(args.system_loc),
+                frameon=False,
+                fontsize=fs,
+            )
+        else:
+            leg = ax.legend(
+                handles=handles,
+                loc=str(args.system_loc),
+                bbox_to_anchor=system_bbox,
+                bbox_transform=ax.transAxes,
+                frameon=False,
+                fontsize=fs,
+            )
         if leg is not None:
             for t in leg.get_texts():
                 t.set_fontweight("bold")
@@ -630,11 +827,11 @@ def main() -> None:
     if args.fermi_line:
         ax.axhline(0.0, color="gray", linestyle="--", lw=1.0, alpha=0.8)
 
-    ax.set_xlim(float(x[0]), float(x[-1]))
+    ax.set_xlim(*ref_xlim)
     if ylim:
         ax.set_ylim(*ylim)
 
-    ax.set_ylabel(r"$E - E_{f}$ (eV)" if args.fermi is not None else "Energy (eV)")
+    ax.set_ylabel(r"$E - E_{f}$ (eV)" if any(f is not None for f in fermis) else "Energy (eV)")
 
     # No x-label (standard band plot)
 
@@ -654,7 +851,9 @@ def main() -> None:
     fig.tight_layout()
     fig.savefig(args.out, dpi=300)
     print(f"Saved: {args.out}")
-    print(f"K-point indexing convention: {scheme} (data points per band: {len(x)})")
+    if ref_scheme is not None:
+        ndata = ref_n_data if ref_n_data is not None else "?"
+        print(f"K-point indexing convention: {ref_scheme} (data points per band: {ndata})")
 
     if args.show:
         plt.show()
