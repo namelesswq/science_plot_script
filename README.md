@@ -523,6 +523,56 @@ python shengbte_plot/plot_phonon_v.py
 
 ## 3) `shengbte_plot/plot_lattice_scatter.py`
 
+用途：绘制 ShengBTE 散射率（或任意两列数据）的散点分布，并支持多文件叠加对比。
+
+默认物理单位假设：
+- 输入文件第 1 列是频率 $\omega$（`rad/ps`），脚本会自动换算为 `THz`：$\omega_{\mathrm{THz}}=\omega/(2\pi)$
+- 输入文件第 2 列是散射率 $w$（`ps^-1`）
+
+单文件示例：
+
+```bash
+python shengbte_plot/plot_lattice_scatter.py \
+  --file T300K/BTE.w_final \
+  --legend 3ph \
+  --system Zr2SC \
+  --ylog \
+  --ylim 1e-3,2e2 \
+  --figsize 7,5 \
+  --out scattering.png
+```
+
+多文件对比示例（原胞 vs 缺陷）：
+
+```bash
+python shengbte_plot/plot_lattice_scatter.py \
+  --file \
+    T300K/BTE.w_final \
+    ../../../../Zr2SC_defect_Zr/shengbte/Zr_3.0/20-20/T300K/BTE.w_final \
+    ../../../../Zr2SC_defect_S/shengbte/S_3.0/20-20/T300K/BTE.w_final \
+  --legend Pristine 'V[Zr]=3.0%' 'V[S]=3.0%' \
+  --legend-fontsize 10 \
+  --legend-bbox 0.18,0.95 \
+  --system Zr2SC \
+  --ms 10 --alpha 0.4 \
+  --ylog \
+  --ylim 3e-3,3e4 \
+  --figsize 7,5 \
+  --out scattering_compare.png
+```
+
+图例/标注参数约定（与 QE 脚本统一风格）：
+- 数据集图例（带彩色点标识）：`--legend/--legend-format/--legend-fontsize/--legend-loc/--legend-bbox`
+- 整体体系标注（纯文字，粗体）：`--system/--system-format/--system-fontsize/--system-loc/--system-bbox`
+
+说明：
+- `--xlim`/`--xlabel` 的单位是 `THz`（因为脚本会把输入 x 自动换算到 THz）
+- 对数坐标下会自动丢弃非正值点，并给出 warning
+
+---
+
+## 3) `shengbte_plot/plot_lattice_scatter.py`
+
 用途：画晶格散射率散点图（支持把多个 `BTE.w_*` 文件画在同一张图里，并给不同 legend）。
 
 同样是“配置区写死参数”的脚本（没有命令行参数）：
