@@ -3,7 +3,7 @@
 这是一组用于科研绘图的 Python 脚本集合，覆盖：
 - Quantum ESPRESSO：能带、DOS/PDOS（projwfc）以及“能带 + PDOS”合图
 - Perturbo：meanfp（群速度、散射率、电子 MFP）与 κ(T)（结合 ShengBTE + Perturbo）
-- ShengBTE：声子群速度散点、散射率散点、声子 MFP 散点
+- ShengBTE：声子群速度/散射率/MFP 散点、\$\\kappa(T)\$ 张量、累计 \$\\kappa(\\omega)\$ 张量
 
 ## 依赖安装
 
@@ -632,20 +632,45 @@ python shengbte_plot/plot_kappa_tensor_vs_temperature.py \
 
 ---
 
-## 3) `shengbte_plot/plot_lattice_scatter.py`
+## 5) `shengbte_plot/plot_cumulative_kappa_vs_omega_tensor.py`
 
-用途：画晶格散射率散点图（支持把多个 `BTE.w_*` 文件画在同一张图里，并给不同 legend）。
+用途：绘制 ShengBTE 的“随频率累计的晶格热导率张量”曲线（来自 `BTE.cumulative_kappaVsOmega_tensor`），并支持多组数据叠加对比。
 
-同样是“配置区写死参数”的脚本（没有命令行参数）：
-- 在脚本顶部 `files_and_labels = {...}` 里添加/修改文件路径与图例名
-- 可以在顶部设置：`use_log_scale_x/y`、`ylim`、点大小与透明度等
+数据结构约定：
+- 第 1 列：声子角频率 \$\\omega\$（`rad/ps`），脚本会自动换算为 `THz`：\$f_{\\mathrm{THz}}=\\omega/(2\\pi)\$
+- 后 9 列：累计热导率张量分量，顺序为 `xx,xy,xz,yx,yy,yz,zx,zy,zz`
 
-运行：
+单文件示例（默认 `--component avg`，即对角平均）：
 
 ```bash
-python shengbte_plot/plot_lattice_scatter.py
+python shengbte_plot/plot_cumulative_kappa_vs_omega_tensor.py \
+  --file T300K/BTE.cumulative_kappaVsOmega_tensor \
+  --legend T300K \
+  --system Zr2SC \
+  --component avg \
+  --xlim 0,25 \
+  --out cumulative_kappa_vs_freq.png
 ```
 
-注意：该脚本默认会 `plt.show()`，若在无显示环境运行：
-- 设 `export MPLBACKEND=Agg` 或
-- 注释掉 `plt.show()`
+多组对比示例（原胞 vs 缺陷；每组可指定颜色）：
+
+```bash
+python shengbte_plot/plot_cumulative_kappa_vs_omega_tensor.py \
+  --file \
+    prim/T300K/BTE.cumulative_kappaVsOmega_tensor \
+    zr_vac/T300K/BTE.cumulative_kappaVsOmega_tensor \
+    s_vac/T300K/BTE.cumulative_kappaVsOmega_tensor \
+  --legend Pristine 'V[Zr]' 'V[S]' \
+  --color black tab:red tab:blue \
+  --system Zr2SC \
+  --system-bbox 0,0.75 \
+  --component xx \
+  --xlim 0,25 \
+  --out cumulative_kappa_compare.png
+```
+
+常用参数：
+- `--component xx|yy|zz|xy|...|avg|trace`：选择绘制哪个分量（`avg` 为对角平均）
+- `--color ...`：逐组指定线条颜色（支持逐组给值或给 1 个值广播）
+- 数据集图例（彩色线段）：`--legend/--legend-format/--legend-fontsize/--legend-loc/--legend-bbox`
+- 整体体系标注（纯文字，粗体）：`--system/--system-format/--system-fontsize/--system-loc/--system-bbox`
