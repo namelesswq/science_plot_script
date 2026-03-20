@@ -43,6 +43,42 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Glob pattern for PDOS files (overrides auto). Example: 'zr2sc.pdos.pdos_atm#*'",
     )
 
+    # Dataset legend (colored lines)
+    p.add_argument(
+        "--legend",
+        default=None,
+        nargs="+",
+        help=(
+            "Legend label(s) for each dataset (each --tot). Provide one per dataset, or a single value to broadcast. "
+            "If omitted, uses the total DOS filename stem."
+        ),
+    )
+    p.add_argument(
+        "--legend-format",
+        choices=["chem", "raw"],
+        default="raw",
+        help="Render --legend text with subscripts (chem) or raw text (raw). Default: raw.",
+    )
+    p.add_argument(
+        "--legend-fontsize",
+        type=float,
+        default=None,
+        help="Font size for legend text. If omitted, uses matplotlib default.",
+    )
+    p.add_argument(
+        "--legend-loc",
+        default="upper left",
+        help="Legend location (matplotlib legend loc). Default: upper left.",
+    )
+    p.add_argument(
+        "--legend-bbox",
+        default=None,
+        help=(
+            "Optional legend anchor (bbox_to_anchor) in axes coordinates 'x,y'. "
+            "If provided, legend placement uses both --legend-loc and this anchor."
+        ),
+    )
+
     p.add_argument(
         "--elements",
         default=None,
@@ -109,6 +145,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    p.add_argument(
+        "--norm",
+        default=None,
+        nargs="+",
+        help=(
+            "Optional per-dataset normalization factor(s) applied to DOS/PDOS values: y_plot = y/norm. "
+            "Provide one per dataset, or a single value to broadcast."
+        ),
+    )
+
     p.add_argument("--ylog", action="store_true", help="Use log scale on y-axis")
     p.add_argument("--no-bold", action="store_true", help="Disable bold text in the figure")
     p.add_argument(
@@ -139,11 +185,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--system",
         default=None,
-        nargs="+",
-        help=(
-            "Optional system label shown as a separate legend text. "
-            "Comma-separated tokens are accepted."
-        ),
+        help="Overall system/material label shown as a separate legend entry (pure text).",
     )
     p.add_argument(
         "--system-format",
@@ -386,12 +428,10 @@ def main() -> None:
     ylim = _parse_lim(args.ylim)
     n0_map = _parse_n0_map(args.n0)
     figsize_override = _parse_figsize(args.figsize)
+    legend_bbox = _parse_xy(args.legend_bbox)
     system_bbox = _parse_xy(args.system_bbox)
     tot_paths = [str(x) for x in args.tot]
     n_cases = len(tot_paths)
-
-    if n_cases > 1 and args.pdos is not None and len(args.pdos) > 0:
-        raise SystemExit("When providing multiple --tot, do not use --pdos (explicit PDOS list). Use --pdos-glob or auto discovery.")
 
     pdos_globs_in = _flatten_tokens(args.pdos_glob)
     if pdos_globs_in:
@@ -401,15 +441,28 @@ def main() -> None:
 
     fermis = _parse_float_list(args.fermi, n=n_cases, name="--fermi")
 
-    systems_in = _flatten_tokens(args.system)
-    if systems_in:
-        systems = _broadcast_list(systems_in, n_cases, "--system")
+    legends_in = _flatten_tokens(args.legend)
+    if legends_in:
+        legends = _broadcast_list(legends_in, n_cases, "--legend")
     else:
-        systems = [""] * n_cases
+        legends = [Path(p).stem for p in tot_paths]
 
-    elements_filter = None
-    if args.elements:
-        elements_filter = {x.strip() for x in args.elements.split(",") if x.strip()}
+    norms = _parse_float_list(args.norm, n=n_cases, name="--norm")
+    for i, nv in enumerate(norms):
+        if nv is not None and float(nv) == 0.0:
+            raise SystemExit(f"--norm must be non-zero (dataset#{i+1})")
+
+    # Elements filter. Special behavior: if user provided --elements but it parses to empty,
+    # interpret it as "disable PDOS; plot only total DOS".
+    plot_pdos = True
+    elements_filter: Optional[set[str]] = None
+    if args.elements is not None:
+        elems = {x.strip() for x in str(args.elements).split(",") if x.strip()}
+        if not elems:
+            plot_pdos = False
+            elements_filter = set()
+        else:
+            elements_filter = elems
 
     orbitals_filter = None
     plot_total = True
@@ -429,6 +482,16 @@ def main() -> None:
             keep.append(t_raw)
         if keep:
             orbitals_filter = set(keep)
+
+    # If PDOS is disabled (e.g. --elements ''), force plotting total DOS.
+    if not plot_pdos:
+        plot_total = True
+        orbitals_filter = None
+
+    if plot_pdos and (n_cases > 1) and (args.pdos is not None) and (len(args.pdos) > 0):
+        raise SystemExit(
+            "When providing multiple --tot, do not use --pdos (explicit PDOS list). Use --pdos-glob or auto discovery."
+        )
 
     # Plot
     if n_cases > 1:
@@ -477,104 +540,112 @@ def main() -> None:
         pdos_colors = list(pdos_pool)
     next_pdos_color = 0
 
+    # Curve legend entries should always include dataset prefix (from --legend),
+    # so show total DOS in the curve legend as well.
     show_total_in_curve_legend = True
-    if n_cases > 1 and any(systems):
-        show_total_in_curve_legend = False
 
     for ic in range(n_cases):
         tot_path = tot_paths[ic]
         ef = fermis[ic]
+        nv = norms[ic]
 
         # total DOS
         e_tot, dos_tot = _load_two_cols(tot_path, xcol=0, ycol=args.tot_col)
         if ef is not None:
             e_tot = e_tot - float(ef)
+        if nv is not None:
+            dos_tot = dos_tot / float(nv)
 
-        # PDOS file discovery
-        if n_cases == 1 and args.pdos is not None and len(args.pdos) > 0:
-            pdos_files = list(args.pdos)
-        else:
-            pat = str(pdos_globs[ic]).strip()
-            if pat:
-                pattern = pat
+        pdos_files: List[str] = []
+        if plot_pdos:
+            # PDOS file discovery
+            if n_cases == 1 and args.pdos is not None and len(args.pdos) > 0:
+                pdos_files = list(args.pdos)
             else:
-                base = os.path.basename(tot_path)
-                if base.endswith(".pdos.pdos_tot"):
-                    prefix = base[: -len(".pdos.pdos_tot")]
+                pat = str(pdos_globs[ic]).strip()
+                if pat:
+                    pattern = pat
                 else:
-                    prefix = os.path.splitext(base)[0]
-                pattern = os.path.join(os.path.dirname(tot_path) or ".", f"{prefix}.pdos.pdos_atm#*")
-            pdos_files = sorted(glob.glob(pattern))
+                    base = os.path.basename(tot_path)
+                    if base.endswith(".pdos.pdos_tot"):
+                        prefix = base[: -len(".pdos.pdos_tot")]
+                    else:
+                        prefix = os.path.splitext(base)[0]
+                    pattern = os.path.join(os.path.dirname(tot_path) or ".", f"{prefix}.pdos.pdos_atm#*")
+                pdos_files = sorted(glob.glob(pattern))
 
-        if not pdos_files:
-            msg = [
-                "No PDOS files found.",
-                f"- Total DOS file: {tot_path!r}",
-            ]
-            pat = str(pdos_globs[ic]).strip()
-            if pat:
-                msg.append(f"- Your --pdos-glob for this dataset was: {pat!r}")
-                if "pdos_atom#" in pat:
-                    alt = pat.replace("pdos_atom#", "pdos_atm#")
-                    alt_hits = sorted(glob.glob(alt))
-                    if alt_hits:
-                        msg.append(f"- Did you mean: {alt!r} ? (found {len(alt_hits)} files)")
-            else:
-                tot_dir = os.path.dirname(tot_path) or "."
-                generic = os.path.join(tot_dir, "*.pdos.pdos_atm#*")
-                generic_hits = sorted(glob.glob(generic))
-                if generic_hits:
-                    msg.append(f"- In this directory, files matching {generic!r}: {len(generic_hits)}")
-            msg.append("Provide --pdos-glob (one per --tot) or ensure PDOS files exist next to each tot file.")
-            raise SystemExit("\n".join(msg))
+            if not pdos_files:
+                msg = [
+                    "No PDOS files found.",
+                    f"- Total DOS file: {tot_path!r}",
+                ]
+                pat = str(pdos_globs[ic]).strip()
+                if pat:
+                    msg.append(f"- Your --pdos-glob for this dataset was: {pat!r}")
+                    if "pdos_atom#" in pat:
+                        alt = pat.replace("pdos_atom#", "pdos_atm#")
+                        alt_hits = sorted(glob.glob(alt))
+                        if alt_hits:
+                            msg.append(f"- Did you mean: {alt!r} ? (found {len(alt_hits)} files)")
+                else:
+                    tot_dir = os.path.dirname(tot_path) or "."
+                    generic = os.path.join(tot_dir, "*.pdos.pdos_atm#*")
+                    generic_hits = sorted(glob.glob(generic))
+                    if generic_hits:
+                        msg.append(f"- In this directory, files matching {generic!r}: {len(generic_hits)}")
+                msg.append("Provide --pdos-glob (one per --tot) or ensure PDOS files exist next to each tot file.")
+                raise SystemExit("\n".join(msg))
 
-        # Sum PDOS by (element, wfc_index, orbital) unless --merge-wfc
         groups_wfc: Dict[Tuple[str, int, str], np.ndarray] = {}
         groups_merged: Dict[Tuple[str, str], np.ndarray] = {}
         energy_ref: Optional[np.ndarray] = None
 
-        for f in pdos_files:
-            el, wfc_idx, orb = _parse_element_wfc_orbital_from_name(f)
-            if elements_filter is not None and el not in elements_filter:
-                continue
-            if orbitals_filter is not None and orb not in orbitals_filter:
-                continue
+        if plot_pdos:
+            # Sum PDOS by (element, wfc_index, orbital) unless --merge-wfc
+            for f in pdos_files:
+                el, wfc_idx, orb = _parse_element_wfc_orbital_from_name(f)
+                if elements_filter is not None and el not in elements_filter:
+                    continue
+                if orbitals_filter is not None and orb not in orbitals_filter:
+                    continue
 
-            e, y = _load_two_cols(f, xcol=0, ycol=args.pdos_col)
-            if ef is not None:
-                e = e - float(ef)
+                e, y = _load_two_cols(f, xcol=0, ycol=args.pdos_col)
+                if ef is not None:
+                    e = e - float(ef)
+                if nv is not None:
+                    y = y / float(nv)
 
-            if energy_ref is None:
-                energy_ref = e
-            else:
-                if len(e) != len(energy_ref) or np.max(np.abs(e - energy_ref)) > 1e-8:
-                    raise SystemExit(
-                        f"Energy grid mismatch among PDOS files for dataset {tot_path!r}. Offending file: {f}. "
-                        "Please regenerate PDOS with consistent energy grid."
-                    )
+                if energy_ref is None:
+                    energy_ref = e
+                else:
+                    if len(e) != len(energy_ref) or np.max(np.abs(e - energy_ref)) > 1e-8:
+                        raise SystemExit(
+                            f"Energy grid mismatch among PDOS files for dataset {tot_path!r}. Offending file: {f}. "
+                            "Please regenerate PDOS with consistent energy grid."
+                        )
+
+                if args.merge_wfc:
+                    key2 = (el, orb)
+                    if key2 not in groups_merged:
+                        groups_merged[key2] = np.zeros_like(y, dtype=float)
+                    groups_merged[key2] += y
+                else:
+                    key3 = (el, wfc_idx, orb)
+                    if key3 not in groups_wfc:
+                        groups_wfc[key3] = np.zeros_like(y, dtype=float)
+                    groups_wfc[key3] += y
 
             if args.merge_wfc:
-                key2 = (el, orb)
-                if key2 not in groups_merged:
-                    groups_merged[key2] = np.zeros_like(y, dtype=float)
-                groups_merged[key2] += y
+                if not groups_merged:
+                    raise SystemExit(f"No PDOS series selected after applying filters for {tot_path!r}.")
             else:
-                key3 = (el, wfc_idx, orb)
-                if key3 not in groups_wfc:
-                    groups_wfc[key3] = np.zeros_like(y, dtype=float)
-                groups_wfc[key3] += y
-
-        if args.merge_wfc:
-            if not groups_merged:
-                raise SystemExit(f"No PDOS series selected after applying filters for {tot_path!r}.")
-        else:
-            if not groups_wfc:
-                raise SystemExit(f"No PDOS series selected after applying filters for {tot_path!r}.")
+                if not groups_wfc:
+                    raise SystemExit(f"No PDOS series selected after applying filters for {tot_path!r}.")
 
         e_pdos = energy_ref if energy_ref is not None else e_tot
 
         # Labeling
-        sys_lab = _format_system_label(str(systems[ic]), str(args.system_format)) if systems[ic] else Path(tot_path).stem
+        ds_lab = _format_system_label(str(legends[ic]), str(args.legend_format))
         col_case = case_colors[ic % len(case_colors)]
 
         if plot_total:
@@ -583,37 +654,38 @@ def main() -> None:
                 dos_tot,
                 color=col_case,
                 lw=1.6 if args.style == "prb" else 2.4,
-                label=(sys_lab if show_total_in_curve_legend else "_nolegend_"),
+                label=(f"{ds_lab}:Total" if show_total_in_curve_legend else "_nolegend_"),
             )
 
-        # PDOS curves: solid, unique colors (avoid total DOS colors)
-        if args.merge_wfc:
-            keys_sorted = sorted(groups_merged.keys(), key=lambda k: (k[0], k[1]))
-        else:
-            keys_sorted = sorted(groups_wfc.keys(), key=lambda k: (k[0], k[2], k[1]))
-
-        label_map = {}
-        if (not args.merge_wfc) and n0_map:
-            label_map = _build_n_label_map(keys_sorted, n0_map)
-
-        for key in keys_sorted:
+        if plot_pdos:
+            # PDOS curves: solid, unique colors (avoid total DOS colors)
             if args.merge_wfc:
-                el, orb = key  # type: ignore[misc]
-                y = groups_merged[(el, orb)]
-                lab0 = f"{el}-{orb}"
+                keys_sorted = sorted(groups_merged.keys(), key=lambda k: (k[0], k[1]))
             else:
-                el, wfc_idx, orb = key  # type: ignore[misc]
-                y = groups_wfc[(el, wfc_idx, orb)]
-                lab0 = label_map.get((el, int(wfc_idx), orb), f"{el}-{wfc_idx}{orb}")
-            col = pdos_colors[next_pdos_color % len(pdos_colors)]
-            next_pdos_color += 1
-            ax.plot(
-                e_pdos,
-                y,
-                lw=1.2 if args.style == "prb" else 2.0,
-                color=col,
-                label=f"{sys_lab}:{lab0}" if n_cases > 1 else lab0,
-            )
+                keys_sorted = sorted(groups_wfc.keys(), key=lambda k: (k[0], k[2], k[1]))
+
+            label_map = {}
+            if (not args.merge_wfc) and n0_map:
+                label_map = _build_n_label_map(keys_sorted, n0_map)
+
+            for key in keys_sorted:
+                if args.merge_wfc:
+                    el, orb = key  # type: ignore[misc]
+                    y = groups_merged[(el, orb)]
+                    lab0 = f"{el}-{orb}"
+                else:
+                    el, wfc_idx, orb = key  # type: ignore[misc]
+                    y = groups_wfc[(el, wfc_idx, orb)]
+                    lab0 = label_map.get((el, int(wfc_idx), orb), f"{el}-{wfc_idx}{orb}")
+                col = pdos_colors[next_pdos_color % len(pdos_colors)]
+                next_pdos_color += 1
+                ax.plot(
+                    e_pdos,
+                    y,
+                    lw=1.2 if args.style == "prb" else 2.0,
+                    color=col,
+                    label=f"{ds_lab}:{lab0}",
+                )
 
     if args.fermi_line:
         ax.axvline(0.0, color="gray", linestyle="--", lw=1.2, alpha=0.8)
@@ -638,74 +710,54 @@ def main() -> None:
     if ylim:
         ax.set_ylim(*ylim)
 
+    # Curve legend (orbitals; can be large)
     if args.style == "prb":
-        leg = ax.legend(frameon=False, ncols=2)
+        leg_curve = ax.legend(frameon=False, ncols=2)
     else:
         ax.grid(True, alpha=0.25)
-        leg = ax.legend(frameon=False, fontsize=10, ncols=2)
+        leg_curve = ax.legend(frameon=False, fontsize=10, ncols=2)
 
-    # System legend
-    if n_cases == 1:
-        system_label = _format_system_label(str(systems[0]), str(args.system_format)) if systems[0] else ""
-        if system_label:
-            fs = args.system_fontsize
-            if fs is None:
-                try:
-                    fs = float(ax.yaxis.label.get_size()) * 1.15
-                except Exception:
-                    fs = None
-            handle = Line2D([0], [0], color="none", lw=0, label=system_label)
-            if leg is not None:
-                ax.add_artist(leg)
-            if system_bbox is None:
-                leg_sys = ax.legend(handles=[handle], loc=str(args.system_loc), frameon=False, fontsize=fs)
-            else:
-                leg_sys = ax.legend(
-                    handles=[handle],
-                    loc=str(args.system_loc),
-                    bbox_to_anchor=system_bbox,
-                    bbox_transform=ax.transAxes,
-                    frameon=False,
-                    fontsize=fs,
-                )
-            if leg_sys is not None:
-                for t in leg_sys.get_texts():
-                    t.set_fontweight("bold")
-    else:
-        if any(systems):
-            handles: List[Line2D] = []
-            for ic in range(n_cases):
-                if not systems[ic]:
-                    continue
-                sys_lab = _format_system_label(str(systems[ic]), str(args.system_format))
-                col = case_colors[ic % len(case_colors)]
-                handles.append(Line2D([0], [0], color=col, lw=1.6 if args.style == "prb" else 2.4, label=sys_lab))
+    # Note: we intentionally do NOT add a separate dataset legend here.
+    # PDOS/TOT curve legend already uses "<legend>:<series>" labels.
+    leg_main = None
 
-            fs = args.system_fontsize
-            if fs is None:
-                try:
-                    fs = float(ax.yaxis.label.get_size()) * 1.15
-                except Exception:
-                    fs = None
+    # Global system annotation legend (pure text)
+    if args.system is not None and str(args.system).strip():
+        sys_lab = _format_system_label(str(args.system), str(args.system_format))
+        handle = Line2D([0], [0], color="none", lw=0, label=sys_lab)
+        fs = args.system_fontsize
+        if fs is None:
+            try:
+                fs = float(ax.yaxis.label.get_size()) * 1.15
+            except Exception:
+                fs = None
 
-            if leg is not None:
-                ax.add_artist(leg)
-            if system_bbox is None:
-                leg_sys = ax.legend(handles=handles, loc=str(args.system_loc), frameon=False, fontsize=fs)
-            else:
-                leg_sys = ax.legend(
-                    handles=handles,
-                    loc=str(args.system_loc),
-                    bbox_to_anchor=system_bbox,
-                    bbox_transform=ax.transAxes,
-                    frameon=False,
-                    fontsize=fs,
-                )
-            if leg_sys is not None:
-                for t in leg_sys.get_texts():
-                    t.set_fontweight("bold")
+        if leg_curve is not None:
+            ax.add_artist(leg_curve)
 
-    _apply_style(ax, legend=leg, bold=(not args.no_bold) and (args.style != "prb"), sci_y=args.sci_y, ylog=args.ylog)
+        if system_bbox is None:
+            leg_sys = ax.legend(handles=[handle], loc=str(args.system_loc), frameon=False, fontsize=fs, handlelength=0)
+        else:
+            leg_sys = ax.legend(
+                handles=[handle],
+                loc=str(args.system_loc),
+                bbox_to_anchor=system_bbox,
+                bbox_transform=ax.transAxes,
+                frameon=False,
+                fontsize=fs,
+                handlelength=0,
+            )
+        if leg_sys is not None:
+            for t in leg_sys.get_texts():
+                t.set_fontweight("bold")
+
+    _apply_style(
+        ax,
+        legend=leg_curve,
+        bold=(not args.no_bold) and (args.style != "prb"),
+        sci_y=args.sci_y,
+        ylog=args.ylog,
+    )
 
     fig.tight_layout()
     fig.savefig(args.out, dpi=300)

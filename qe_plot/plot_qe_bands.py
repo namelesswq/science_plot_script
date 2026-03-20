@@ -104,13 +104,45 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--show", action="store_true", help="Show interactively")
 
     p.add_argument(
-        "--system",
+        "--legend",
         default=None,
         nargs="+",
         help=(
-            "System label(s) used as curve labels. Provide one per dataset, e.g. '--system Zr2SC Zr15S8C8'. "
+            "Legend label(s) for each dataset. Provide one per dataset, or a single value to broadcast. "
             "If only one label is given, it is broadcast. Comma-separated tokens are also accepted."
         ),
+    )
+    p.add_argument(
+        "--legend-format",
+        choices=["chem", "raw"],
+        default="raw",
+        help="Render --legend text with subscripts (chem) or raw text (raw). Default: raw.",
+    )
+    p.add_argument(
+        "--legend-fontsize",
+        type=float,
+        default=None,
+        help="Font size for legend text. If omitted, uses matplotlib default.",
+    )
+    p.add_argument(
+        "--legend-loc",
+        default="upper left",
+        help="Legend location (matplotlib legend loc). Default: upper left.",
+    )
+
+    p.add_argument(
+        "--legend-bbox",
+        default=None,
+        help=(
+            "Optional legend anchor (bbox_to_anchor) in axes coordinates 'x,y'. "
+            "If provided, legend placement uses both --legend-loc and this anchor."
+        ),
+    )
+
+    p.add_argument(
+        "--system",
+        default=None,
+        help="Overall system/material label shown as a separate legend entry (pure text).",
     )
     p.add_argument(
         "--system-format",
@@ -129,13 +161,22 @@ def _build_parser() -> argparse.ArgumentParser:
         default="upper left",
         help="Legend location for --system (matplotlib legend loc). Default: upper left.",
     )
-
     p.add_argument(
         "--system-bbox",
         default=None,
         help=(
-            "Optional legend anchor (bbox_to_anchor) in axes coordinates 'x,y' (e.g. '1.02,1.0' for outside right). "
+            "Optional legend anchor (bbox_to_anchor) in axes coordinates 'x,y'. "
             "If provided, legend placement uses both --system-loc and this anchor."
+        ),
+    )
+
+    p.add_argument(
+        "--norm",
+        default=None,
+        nargs="+",
+        help=(
+            "Optional per-dataset normalization factor(s) applied to the energy axis after Fermi shift: "
+            "E_plot = (E - Ef)/norm. Provide one per dataset, or a single value to broadcast."
         ),
     )
 
@@ -663,6 +704,7 @@ def main() -> None:
 
     ylim = _parse_lim(args.ylim)
     figsize = _parse_figsize(args.figsize)
+    legend_bbox = _parse_xy(args.legend_bbox)
     system_bbox = _parse_xy(args.system_bbox)
 
     bands_paths = [str(x) for x in args.bands]
@@ -677,11 +719,16 @@ def main() -> None:
 
     fermis = _parse_float_list(args.fermi, n=n_cases, name="--fermi")
 
-    systems = _flatten_tokens(args.system)
-    if systems:
-        systems = _broadcast_list(systems, n_cases, "--system")
+    legends = _flatten_tokens(args.legend)
+    if legends:
+        legends = _broadcast_list(legends, n_cases, "--legend")
     else:
-        systems = [""] * n_cases
+        legends = [Path(p).name for p in bands_paths]
+
+    norms = _parse_float_list(args.norm, n=n_cases, name="--norm")
+    for i, nv in enumerate(norms):
+        if nv is not None and float(nv) == 0.0:
+            raise SystemExit(f"--norm must be non-zero (dataset#{i+1})")
 
     # Reference axis (first dataset)
     ref_xticks: Optional[List[float]] = None
@@ -768,6 +815,9 @@ def main() -> None:
         ef = fermis[ic]
         if ef is not None:
             y_arrays = [b - float(ef) for b in bands]
+        nv = norms[ic]
+        if nv is not None:
+            y_arrays = [b / float(nv) for b in y_arrays]
 
         col = case_colors[ic % len(case_colors)]
         alpha = 1.0 if ic == 0 else 0.65
@@ -787,15 +837,39 @@ def main() -> None:
     # Keep only high-symmetry vertical lines on x-axis; hide tick marks (but keep labels).
     ax.tick_params(axis="x", which="both", bottom=False, top=False, length=0)
 
-    # System legend: one entry per dataset
-    if any(systems):
-        handles: List[Line2D] = []
-        for ic in range(n_cases):
-            if not systems[ic]:
-                continue
-            sys_lab = _format_system_label(str(systems[ic]), str(args.system_format))
-            col = case_colors[ic % len(case_colors)]
-            handles.append(Line2D([0], [0], color=col, lw=lw_band, label=sys_lab))
+    # Dataset legend (colored lines)
+    handles_leg: List[Line2D] = []
+    for ic in range(n_cases):
+        lab = _format_system_label(str(legends[ic]), str(args.legend_format))
+        col = case_colors[ic % len(case_colors)]
+        handles_leg.append(Line2D([0], [0], color=col, lw=lw_band, label=lab))
+
+    leg_main = None
+    if handles_leg:
+        kwargs = dict(
+            handles=handles_leg,
+            loc=str(args.legend_loc),
+            frameon=False,
+            borderaxespad=0.2,
+            handlelength=1.8,
+            handletextpad=0.6,
+            labelspacing=0.35,
+        )
+        if args.legend_fontsize is not None:
+            kwargs["fontsize"] = float(args.legend_fontsize)
+        if legend_bbox is None:
+            leg_main = ax.legend(**kwargs)
+        else:
+            leg_main = ax.legend(
+                **kwargs,
+                bbox_to_anchor=legend_bbox,
+                bbox_transform=ax.transAxes,
+            )
+
+    # Global system annotation legend (pure text)
+    if args.system is not None and str(args.system).strip():
+        sys_lab = _format_system_label(str(args.system), str(args.system_format))
+        h = Line2D([], [], color="none", label=sys_lab)
 
         fs = args.system_fontsize
         if fs is None:
@@ -804,24 +878,33 @@ def main() -> None:
             except Exception:
                 fs = None
 
+        if leg_main is not None:
+            ax.add_artist(leg_main)
+
         if system_bbox is None:
-            leg = ax.legend(
-                handles=handles,
+            leg_sys = ax.legend(
+                handles=[h],
                 loc=str(args.system_loc),
                 frameon=False,
+                handlelength=0,
+                handletextpad=0.0,
+                borderaxespad=0.2,
                 fontsize=fs,
             )
         else:
-            leg = ax.legend(
-                handles=handles,
+            leg_sys = ax.legend(
+                handles=[h],
                 loc=str(args.system_loc),
                 bbox_to_anchor=system_bbox,
                 bbox_transform=ax.transAxes,
                 frameon=False,
+                handlelength=0,
+                handletextpad=0.0,
+                borderaxespad=0.2,
                 fontsize=fs,
             )
-        if leg is not None:
-            for t in leg.get_texts():
+        if leg_sys is not None:
+            for t in leg_sys.get_texts():
                 t.set_fontweight("bold")
 
     if args.fermi_line:

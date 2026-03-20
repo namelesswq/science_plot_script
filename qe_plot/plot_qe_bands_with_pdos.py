@@ -144,6 +144,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--fermi-line", action="store_true", help="Draw a horizontal line at E=0")
 
+    p.add_argument(
+        "--norm",
+        default=None,
+        nargs="+",
+        help=(
+            "Optional per-dataset normalization factor(s) applied to DOS/PDOS values (right panel): x_plot = x/norm. "
+            "Provide one per dataset, or a single value to broadcast."
+        ),
+    )
+
     p.add_argument("--ylim", default=None, help='Shared energy limits "ymin,ymax" in eV (after Fermi shift if used)')
 
     p.add_argument(
@@ -194,26 +204,59 @@ def _build_parser() -> argparse.ArgumentParser:
         help='PDOS panel x limits (DOS axis) "xmin,xmax". If omitted, auto from data.',
     )
     p.add_argument(
-        "--legend-loc",
+        "--pdos-legend-loc",
         default="best",
         help=(
             "Legend location inside the DOS panel. Passed to matplotlib legend(loc=...). "
             "Examples: 'best', 'upper right', 'upper left', 'lower right', 'lower left'."
         ),
     )
-    p.add_argument("--legend-fontsize", type=float, default=None, help="Legend fontsize for PDOS panel")
+    p.add_argument("--pdos-legend-fontsize", type=float, default=None, help="Legend fontsize for PDOS panel")
 
     p.add_argument("--out", default="bands_pdos.png", help="Output image path")
     p.add_argument("--show", action="store_true", help="Show interactively")
 
+    # Dataset legend (colored lines)
     p.add_argument(
-        "--system",
+        "--legend",
         default=None,
         nargs="+",
         help=(
-            "System label(s) used to identify datasets. Provide one per dataset, e.g. '--system Zr2SC Zr15S8C8'. "
-            "If only one label is given, it is broadcast. Comma-separated tokens are also accepted."
+            "Legend label(s) for each dataset. Provide one per dataset, or a single value to broadcast. "
+            "If omitted, uses the basename of each --bands file."
         ),
+    )
+    p.add_argument(
+        "--legend-format",
+        choices=["chem", "raw"],
+        default="raw",
+        help="Render --legend text with subscripts (chem) or raw text (raw). Default: raw.",
+    )
+    p.add_argument(
+        "--legend-fontsize",
+        type=float,
+        default=None,
+        help="Font size for legend text. If omitted, uses matplotlib default.",
+    )
+    p.add_argument(
+        "--legend-loc",
+        default="upper left",
+        help="Legend location (matplotlib legend loc). Default: upper left.",
+    )
+    p.add_argument(
+        "--legend-bbox",
+        default=None,
+        help=(
+            "Optional legend anchor (bbox_to_anchor) in axes coordinates 'x,y'. "
+            "If provided, legend placement uses both --legend-loc and this anchor."
+        ),
+    )
+
+    # Global system annotation (pure text)
+    p.add_argument(
+        "--system",
+        default=None,
+        help="Overall system/material label shown as a separate legend entry (pure text).",
     )
     p.add_argument(
         "--system-format",
@@ -232,12 +275,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default="upper left",
         help="Legend location for --system (matplotlib legend loc). Default: upper left.",
     )
-
     p.add_argument(
         "--system-bbox",
         default=None,
         help=(
-            "Optional legend anchor (bbox_to_anchor) in axes coordinates 'x,y' (e.g. '1.02,1.0' for outside right). "
+            "Optional legend anchor (bbox_to_anchor) in axes coordinates 'x,y'. "
             "If provided, legend placement uses both --system-loc and this anchor."
         ),
     )
@@ -850,6 +892,7 @@ def main() -> None:
     figsize_dos = _parse_figsize(args.figsize_dos)
     ratios = _parse_ratios(args.ratios)
     n0_map = _parse_n0_map(args.n0)
+    legend_bbox = _parse_xy(args.legend_bbox)
     system_bbox = _parse_xy(args.system_bbox)
 
     # Style
@@ -879,12 +922,16 @@ def main() -> None:
 
     fermi_list = _parse_float_list(args.fermi, n=n_dataset, name="--fermi")
 
-    systems: List[Optional[str]]
-    sys_flat = _flatten_tokens(args.system)
-    if not sys_flat:
-        systems = [None] * n_dataset
+    norms = _parse_float_list(args.norm, n=n_dataset, name="--norm")
+    for i, nv in enumerate(norms):
+        if nv is not None and float(nv) == 0.0:
+            raise SystemExit(f"--norm must be non-zero (dataset#{i+1})")
+
+    legends_flat = _flatten_tokens(args.legend)
+    if legends_flat:
+        legends = _broadcast_list([str(x) for x in legends_flat], n_dataset, "--legend")
     else:
-        systems = _broadcast_list([str(x) for x in sys_flat], n_dataset, "--system")
+        legends = [Path(str(p)).name for p in bands_paths]
 
     pdos_globs: List[Optional[str]]
     if args.pdos_glob is None:
@@ -899,9 +946,17 @@ def main() -> None:
     if n_dataset > 1 and args.pdos is not None and len(args.pdos) > 0:
         raise SystemExit("When comparing multiple datasets, --pdos (explicit file list) is not supported. Use per-dataset --pdos-glob or auto discovery from each --tot.")
 
-    elements_filter = None
-    if args.elements:
-        elements_filter = {x.strip() for x in args.elements.split(",") if x.strip()}
+    # Elements filter. Special behavior: if user provided --elements but it parses to empty,
+    # interpret it as "disable PDOS; plot only total DOS".
+    plot_pdos = True
+    elements_filter: Optional[set[str]] = None
+    if args.elements is not None:
+        elems = {x.strip() for x in str(args.elements).split(",") if x.strip()}
+        if not elems:
+            plot_pdos = False
+            elements_filter = set()
+        else:
+            elements_filter = elems
 
     orbitals_filter = None
     plot_total = True
@@ -920,6 +975,11 @@ def main() -> None:
             keep.append(t_raw)
         if keep:
             orbitals_filter = set(keep)
+
+    # If PDOS is disabled (e.g. --elements ''), force plotting total DOS on the DOS panel.
+    if not plot_pdos:
+        plot_total = True
+        orbitals_filter = None
 
     dataset_colors = [
         "black",
@@ -1008,36 +1068,41 @@ def main() -> None:
         # --- DOS/PDOS ---
         e_tot_i, dos_tot_i = _load_two_cols(str(tot_paths[i]), xcol=0, ycol=args.tot_col)
 
-        # PDOS file list (per dataset)
-        if n_dataset == 1 and args.pdos is not None and len(args.pdos) > 0:
-            pdos_files_i = list(args.pdos)
-        else:
-            if pdos_globs[i]:
-                pattern = str(pdos_globs[i])
+        # PDOS file list + series (optional)
+        if plot_pdos:
+            if n_dataset == 1 and args.pdos is not None and len(args.pdos) > 0:
+                pdos_files_i = list(args.pdos)
             else:
-                base = os.path.basename(str(tot_paths[i]))
-                if base.endswith(".pdos.pdos_tot"):
-                    prefix = base[: -len(".pdos.pdos_tot")]
+                if pdos_globs[i]:
+                    pattern = str(pdos_globs[i])
                 else:
-                    prefix = os.path.splitext(base)[0]
-                pattern = os.path.join(os.path.dirname(str(tot_paths[i])) or ".", f"{prefix}.pdos.pdos_atm#*")
-            pdos_files_i = sorted(glob.glob(pattern))
+                    base = os.path.basename(str(tot_paths[i]))
+                    if base.endswith(".pdos.pdos_tot"):
+                        prefix = base[: -len(".pdos.pdos_tot")]
+                    else:
+                        prefix = os.path.splitext(base)[0]
+                    pattern = os.path.join(os.path.dirname(str(tot_paths[i])) or ".", f"{prefix}.pdos.pdos_atm#*")
+                pdos_files_i = sorted(glob.glob(pattern))
 
-        if not pdos_files_i:
-            raise SystemExit(
-                "No PDOS files found for dataset#{idx}. Provide a correct --pdos-glob (one per dataset) or ensure auto-discovery works for --tot.".format(
-                    idx=i + 1
+            if not pdos_files_i:
+                raise SystemExit(
+                    "No PDOS files found for dataset#{idx}. Provide a correct --pdos-glob (one per dataset) or ensure auto-discovery works for --tot.".format(
+                        idx=i + 1
+                    )
                 )
-            )
 
-        e_pdos_i, series_i, labels_i = _load_pdos_groups(
-            tot_path=str(tot_paths[i]),
-            pdos_files=pdos_files_i,
-            elements_filter=elements_filter,
-            orbitals_filter=orbitals_filter,
-            merge_wfc=args.merge_wfc,
-            pdos_col=args.pdos_col,
-        )
+            e_pdos_i, series_i, labels_i = _load_pdos_groups(
+                tot_path=str(tot_paths[i]),
+                pdos_files=pdos_files_i,
+                elements_filter=elements_filter,
+                orbitals_filter=orbitals_filter,
+                merge_wfc=args.merge_wfc,
+                pdos_col=args.pdos_col,
+            )
+        else:
+            e_pdos_i = np.asarray(e_tot_i, dtype=float)
+            series_i = {}
+            labels_i = []
 
         # Optional relabeling with n0 (only when not merging wfc)
         if (not args.merge_wfc) and n0_map:
@@ -1066,6 +1131,13 @@ def main() -> None:
         if fermi_i is not None:
             e_tot_i = e_tot_i - float(fermi_i)
             e_pdos_i = e_pdos_i - float(fermi_i)
+
+        # Optional normalization for DOS/PDOS values (right panel)
+        nv = norms[i]
+        if nv is not None:
+            dos_tot_i = dos_tot_i / float(nv)
+            for k in list(series_i.keys()):
+                series_i[k] = series_i[k] / float(nv)
 
         dos_e_tot.append(e_tot_i)
         dos_tot.append(dos_tot_i)
@@ -1122,50 +1194,75 @@ def main() -> None:
     # Keep only high-symmetry vertical lines on x-axis; hide tick marks (but keep labels).
     ax_band.tick_params(axis="x", which="both", bottom=False, top=False, length=0)
 
-    if any(s is not None and str(s).strip() for s in systems):
-        handles_sys: List[Line2D] = []
-        for i in range(n_dataset):
-            if systems[i] is None or str(systems[i]).strip() == "":
-                continue
-            sys_lab = _format_system_label(str(systems[i]), str(args.system_format))
-            color_i = dataset_colors[i % len(dataset_colors)]
-            if n_dataset == 1:
-                handles_sys.append(Line2D([], [], color="none", label=sys_lab))
-            else:
-                handles_sys.append(Line2D([], [], color=color_i, lw=lw_band, label=sys_lab))
+    # Dataset legend (colored lines)
+    handles_leg: List[Line2D] = []
+    for i in range(n_dataset):
+        lab = _format_system_label(str(legends[i]), str(args.legend_format))
+        color_i = dataset_colors[i % len(dataset_colors)]
+        handles_leg.append(Line2D([], [], color=color_i, lw=lw_band, label=lab))
 
-        if handles_sys:
-            fs = args.system_fontsize
-            if fs is None:
-                try:
-                    fs = float(ax_band.yaxis.label.get_size()) * 1.15
-                except Exception:
-                    fs = None
-            if system_bbox is None:
-                leg_sys = ax_band.legend(
-                    handles=handles_sys,
-                    loc=str(args.system_loc),
-                    frameon=False,
-                    handlelength=(0 if n_dataset == 1 else 1.8),
-                    handletextpad=(0.0 if n_dataset == 1 else 0.6),
-                    borderaxespad=0.2,
-                    fontsize=fs,
-                )
-            else:
-                leg_sys = ax_band.legend(
-                    handles=handles_sys,
-                    loc=str(args.system_loc),
-                    bbox_to_anchor=system_bbox,
-                    bbox_transform=ax_band.transAxes,
-                    frameon=False,
-                    handlelength=(0 if n_dataset == 1 else 1.8),
-                    handletextpad=(0.0 if n_dataset == 1 else 0.6),
-                    borderaxespad=0.2,
-                    fontsize=fs,
-                )
-            if leg_sys is not None:
-                for t in leg_sys.get_texts():
-                    t.set_fontweight("bold")
+    leg_main = None
+    if handles_leg:
+        kwargs = dict(
+            handles=handles_leg,
+            loc=str(args.legend_loc),
+            frameon=False,
+            borderaxespad=0.2,
+            handlelength=1.8,
+            handletextpad=0.6,
+            labelspacing=0.35,
+        )
+        if args.legend_fontsize is not None:
+            kwargs["fontsize"] = float(args.legend_fontsize)
+        if legend_bbox is None:
+            leg_main = ax_band.legend(**kwargs)
+        else:
+            leg_main = ax_band.legend(
+                **kwargs,
+                bbox_to_anchor=legend_bbox,
+                bbox_transform=ax_band.transAxes,
+            )
+
+    # Global system annotation legend (pure text)
+    if args.system is not None and str(args.system).strip():
+        sys_lab = _format_system_label(str(args.system), str(args.system_format))
+        h = Line2D([], [], color="none", label=sys_lab)
+
+        fs = args.system_fontsize
+        if fs is None:
+            try:
+                fs = float(ax_band.yaxis.label.get_size()) * 1.15
+            except Exception:
+                fs = None
+
+        if leg_main is not None:
+            ax_band.add_artist(leg_main)
+
+        if system_bbox is None:
+            leg_sys = ax_band.legend(
+                handles=[h],
+                loc=str(args.system_loc),
+                frameon=False,
+                handlelength=0,
+                handletextpad=0.0,
+                borderaxespad=0.2,
+                fontsize=fs,
+            )
+        else:
+            leg_sys = ax_band.legend(
+                handles=[h],
+                loc=str(args.system_loc),
+                bbox_to_anchor=system_bbox,
+                bbox_transform=ax_band.transAxes,
+                frameon=False,
+                handlelength=0,
+                handletextpad=0.0,
+                borderaxespad=0.2,
+                fontsize=fs,
+            )
+        if leg_sys is not None:
+            for t in leg_sys.get_texts():
+                t.set_fontweight("bold")
 
     # --- Plot rotated DOS/PDOS (x = DOS, y = Energy) ---
     # Total DOS (optional)
@@ -1210,19 +1307,11 @@ def main() -> None:
     for i in range(n_dataset):
         color_i = dataset_colors[i % len(dataset_colors)]
         alpha_i = 1.0 if i == 0 else 0.9
-        sys_i = systems[i]
-        sys_prefix = None
-        if n_dataset > 1:
-            if sys_i is not None and str(sys_i).strip():
-                sys_prefix = str(sys_i)
-            else:
-                sys_prefix = f"D{i+1}"
+        # Always prefix DOS/PDOS legend entries by dataset legend.
+        ds_prefix = str(legends[i]) if str(legends[i]).strip() else (f"D{i+1}" if n_dataset > 1 else "D1")
 
         if plot_total:
-            if sys_prefix is None:
-                lab_tot = "Total"
-            else:
-                lab_tot = f"{sys_prefix}:Total"
+            lab_tot = f"{ds_prefix}:Total"
             ax_dos.plot(dos_tot[i], dos_e_tot[i], color=color_i, lw=lw_tot, alpha=alpha_i, label=lab_tot)
 
         # PDOS
@@ -1230,7 +1319,7 @@ def main() -> None:
             y = pdos_series[i][lab]
             c = pick_pdos_color(len(taken_pdos), taken_pdos)
             taken_pdos.append(c)
-            lab2 = lab if sys_prefix is None else f"{sys_prefix}:{lab}"
+            lab2 = f"{ds_prefix}:{lab}"
             ax_dos.plot(y, pdos_e[i], lw=lw_pdos, color=c, alpha=alpha_i, label=lab2)
 
     # Shared y decorations
@@ -1281,8 +1370,8 @@ def main() -> None:
     ax_dos.tick_params(axis="y", which="both", left=False, labelleft=False)
 
     # Legend on DOS panel (keeps figure interpretable even without x-axis label)
-    leg_loc = str(args.legend_loc)
-    leg_fs = args.legend_fontsize
+    leg_loc = str(args.pdos_legend_loc)
+    leg_fs = args.pdos_legend_fontsize
     if leg_fs is None:
         leg = ax_dos.legend(loc=leg_loc, frameon=False)
     else:

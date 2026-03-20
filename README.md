@@ -50,6 +50,7 @@ export MPLBACKEND=Agg
 ```bash
 python qe_plot/plot_qe_dos_pdos_overlay.py \
   --tot zr2sc.pdos.pdos_tot \
+  --legend Pristine \
   --elements Zr,S,C \
   --orbitals s,p,d \
   --merge-wfc \
@@ -62,22 +63,37 @@ python qe_plot/plot_qe_dos_pdos_overlay.py \
   --out dos_pdos.png
 ```
 
-多体系对比示例（多组总 DOS + PDOS 叠加；每组可有自己的 fermi 与 PDOS glob）：
+多体系对比示例（多组总 DOS + PDOS 叠加；每组可有自己的 `--fermi`/`--norm`/PDOS glob；曲线图例会自动变成 `legend:Total` 与 `legend:El-orb`）：
 
 ```bash
 python qe_plot/plot_qe_dos_pdos_overlay.py \
   --tot prim/zr2sc.pdos.pdos_tot sc222/zr2sc.pdos.pdos_tot \
   --pdos-glob 'prim/zr2sc.pdos.pdos_atm#*' 'sc222/zr2sc.pdos.pdos_atm#*' \
+  --legend Pristine 2x2x2 \
   --elements Zr,S,C \
   --orbitals s,p,d \
   --merge-wfc \
   --fermi 14.776,14.812 \
+  --norm 1,4 \
   --fermi-line \
-  --system Zr2SC,2x2x2 \
+  --system Zr2SC \
   --system-fontsize 12 \
   --system-bbox 0,0.75 \
   --xlim -5,5 \
   --out dos_pdos_compare.png
+```
+
+只画总 DOS（tot-only）示例：当显式传了 `--elements` 但内容为空白时，会自动关闭 PDOS，只绘制总 DOS：
+
+```bash
+python qe_plot/plot_qe_dos_pdos_overlay.py \
+  --tot zr2sc.pdos.pdos_tot \
+  --legend Pristine \
+  --elements ' ' \
+  --fermi 14.776 \
+  --fermi-line \
+  --system Zr2SC \
+  --out dos_only.png
 ```
 
 常用参数：
@@ -86,8 +102,10 @@ python qe_plot/plot_qe_dos_pdos_overlay.py \
 - `--merge-wfc`：将同一元素同一轨道的不同 `wfc#` 合并为一条曲线
 - `--n0 'Zr=4,S=3,C=2'`：不合并 wfc 时，把 `wfc#` 重新标成“主量子数标签”（如 Zr-4d、Zr-5d…）
 - `--tot-col` / `--pdos-col`：指定读哪一列（0-based；默认都取第 2 列即 `col=1`）
+- `--legend`：每组数据的前缀标签（支持 1 个值广播到所有体系，或给 N 个值对应 N 组）
+- `--norm`：对每组 DOS/PDOS 的 y 值做归一化（除以 `norm`；同样支持广播/逐组）
 - `--style prb|default`、`--figsize 3.4,2.6`、`--ylog`、`--sci-y auto|on|off`
-- `--system` / `--system-format chem|raw` / `--system-fontsize` / `--system-loc` / `--system-bbox x,y`：在图内标注体系名称（`--system-bbox` 用轴坐标 0~1 精确定位）
+- `--system` / `--system-format chem|raw` / `--system-fontsize` / `--system-loc` / `--system-bbox x,y`：在图内标注一个全局体系名称（`--system-bbox` 用轴坐标 0~1 精确定位）
 
 ---
 
@@ -107,6 +125,7 @@ python qe_plot/plot_qe_bands.py \
   --bands bands.out.gnu \
   --band-in band.in \
   --kpath KPATH.in \
+  --legend Pristine \
   --fermi 14.776 \
   --fermi-line \
   --ylim -5,5 \
@@ -124,10 +143,12 @@ python qe_plot/plot_qe_bands.py \
   --bands prim/bands.out.gnu sc222/bands.out.gnu \
   --band-in prim/band.in sc222/band.in \
   --kpath KPATH.in \
+  --legend Pristine 2x2x2 \
   --fermi 14.776,14.812 \
+  --norm 1,1 \
   --fermi-line \
   --ylim -5,5 \
-  --system Zr2SC,2x2x2 \
+  --system Zr2SC \
   --system-fontsize 14 \
   --system-bbox 0,0.75 \
   --lw 0.6 \
@@ -139,8 +160,10 @@ python qe_plot/plot_qe_bands.py \
 说明：
 - 当 `band.in` 中某行 `N=1` 时，该位置视作不连续点：刻度标签会被合并成 `A|L`（终点|起点），且能带不会跨越该点连线。
 - x 轴只保留高对称点处的竖线（`axvline`），不再显示刻度短线；高对称点标签仍会显示。
+- 多体系叠加时用 `--legend` 区分每组数据；`--system` 只用于图内的一个全局标注。
 - 可用 `--system` 在图内标注体系名称（默认会把化学式中的数字渲染为下标，如 `Zr2SC → Zr$_{2}$SC`）；若不想下标，用 `--system-format raw`。
 - 体系标注位置：用 `--system-loc` 选大致方位；如需精确摆放（或放到图外），用 `--system-bbox x,y`（轴坐标系 0~1），例如 `--system-bbox 1.02,1.0`。
+- `--fermi`/`--norm` 支持逐组设置：能量轴会先做费米能级平移 $E\rightarrow E-E_f$，再做归一化 $E\rightarrow (E-E_f)/\text{norm}$（未提供 `--norm` 时等价于 1）。
 
 ---
 
@@ -160,6 +183,7 @@ python qe_plot/plot_qe_bands_with_pdos.py \
   --band-in band.in \
   --kpath KPATH.in \
   --tot zr2sc.pdos.pdos_tot \
+  --legend Pristine \
   --elements Zr,S,C \
   --orbitals s,p,d \
   --merge-wfc \
@@ -168,8 +192,8 @@ python qe_plot/plot_qe_bands_with_pdos.py \
   --ylim -5,5 \
   --figsize-bands 7,3 \
   --figsize-dos 1.5,3 \
-  --legend-fontsize 7 \
-  --legend-loc best \
+  --pdos-legend-fontsize 7 \
+  --pdos-legend-loc best \
   --system Zr2SC \
   --system-fontsize 14 \
   --system-bbox 0,0.75 \
@@ -186,17 +210,19 @@ python qe_plot/plot_qe_bands_with_pdos.py \
   --kpath KPATH.in \
   --tot prim/zr2sc.pdos.pdos_tot sc222/zr2sc.pdos.pdos_tot \
   --pdos-glob 'prim/zr2sc.pdos.pdos_atm#*' 'sc222/zr2sc.pdos.pdos_atm#*' \
+  --legend Pristine 2x2x2 \
   --elements Zr,S,C \
   --orbitals s,p,d \
   --merge-wfc \
   --fermi 14.776,14.812 \
+  --norm 1,4 \
   --fermi-line \
   --ylim -5,5 \
   --figsize-bands 7,3 \
   --figsize-dos 1.8,3 \
-  --legend-fontsize 7 \
-  --legend-loc best \
-  --system Zr2SC,2x2x2 \
+  --pdos-legend-fontsize 7 \
+  --pdos-legend-loc best \
+  --system Zr2SC \
   --system-fontsize 14 \
   --system-bbox 0,0.75 \
   --lw 0.6 \
@@ -210,7 +236,10 @@ python qe_plot/plot_qe_bands_with_pdos.py \
 - `--dos-xlim xmin,xmax`：限制右侧 DOS 轴范围
 - `--ratios 3,1`：面板宽度比（若没用 `--figsize-bands/--figsize-dos`，可用这个快速调比例）
 - `--n0`、`--tot-col`、`--pdos-col`：同上
-- `--system` / `--system-format chem|raw` / `--system-fontsize` / `--system-loc` / `--system-bbox x,y`：在左侧能带面板标注体系（`--system-bbox` 用轴坐标精确定位）
+- `--legend`：每组数据的前缀标签（多体系时用它来区分；支持广播/逐组）
+- `--pdos-legend-loc` / `--pdos-legend-fontsize`：右侧 (P)DOS 面板的曲线图例位置/字号
+- `--norm`：对每组 DOS/PDOS 的 x 值做归一化（除以 `norm`；同样支持广播/逐组）
+- `--system` / `--system-format chem|raw` / `--system-fontsize` / `--system-loc` / `--system-bbox x,y`：在左侧能带面板标注一个全局体系名称（`--system-bbox` 用轴坐标精确定位）
 
 ---
 
