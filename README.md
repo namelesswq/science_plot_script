@@ -2,7 +2,7 @@
 
 这是一组用于科研绘图的 Python 脚本集合，覆盖：
 - Quantum ESPRESSO：能带、DOS/PDOS（projwfc）以及“能带 + PDOS”合图
-- Perturbo：meanfp（群速度、散射率、电子 MFP）与 κ(T)（结合 ShengBTE + Perturbo）
+- Perturbo：meanfp（群速度、散射率、电子 MFP）与电子 κ(T)
 - ShengBTE：声子群速度/散射率/MFP 散点、\$\\kappa(T)\$ 张量、累计 \$\\kappa(\\omega)\$ 张量
 
 ## 依赖安装
@@ -392,7 +392,11 @@ python qe_plot/plot_qe_phonon_bands_with_dos.py \
 - `--mode scatter|binned`：散点或分箱曲线
 - `--bands "1-6"` / `"1,3,5"`：选带（YAML 内的 band index）
 - `--xlim a,b`、`--ylim a,b`
+- `--figsize w,h`：图尺寸（英寸），如 `--figsize 7.2,4.6`
 - `--sci-y auto|on|off`：纵轴科学计数法“×10^n”
+- `--style prb|default`：默认 `prb`；若安装了 SciencePlots 会启用 `science,no-latex` 风格
+- `--legend ...`：多组数据对比时的数据集图例（支持 1 个值广播或逐组）
+- `--system ...`：全局体系标注（独立于数据集图例，纯文字、粗体）
 
 ## 1) `perturbo_plot/plot_group_velocity.py`
 
@@ -403,7 +407,8 @@ python qe_plot/plot_qe_phonon_bands_with_dos.py \
 ```bash
 python perturbo_plot/plot_group_velocity.py \
   zr2sc_meanfp.yml zr2sc_defect_meanfp.yml \
-  --labels pristine,defect \
+  --legend pristine defect \
+  --system Zr2SC \
   --bands 1-6 \
   --x e_minus_mu \
   --mode scatter \
@@ -434,6 +439,8 @@ python perturbo_plot/plot_group_velocity.py \
 ```bash
 python perturbo_plot/plot_scattering_rate.py \
   zr2sc_meanfp.yml \
+  --legend pristine \
+  --system Zr2SC \
   --config 1 \
   --unit ps^-1 \
   --mode scatter \
@@ -453,6 +460,8 @@ python perturbo_plot/plot_scattering_rate.py \
 ```bash
 python perturbo_plot/plot_mean_free_path.py \
   zr2sc_meanfp.yml \
+  --legend pristine \
+  --system Zr2SC \
   --config 1 \
   --mode scatter \
   --ylog \
@@ -464,31 +473,30 @@ python perturbo_plot/plot_mean_free_path.py \
 
 ## 4) `perturbo_plot/plot_kappa_vs_temperature.py`
 
-用途：在一张图里同时画：
-- `κ_latt(T)`：来自 ShengBTE `BTE.KappaTensorVsT_CONV`
-- `κ_el(T)`：来自 Perturbo `*_trans-ita.yml`
-- `κ_total(T)=κ_latt+κ_el`
+用途：绘制 Perturbo 电子热导 `κ_el(T)`（从 `*_trans-ita.yml` 读取），支持多文件对比；`--component` 可一次给多个分量并画在同一张图上。
 
-重要约束：温度网格必须完全一致；脚本不会插值，不一致会直接报错。
+补充：多文件对比时也支持按文件分别设置 `--color` / `--marker` / `--ms`（支持 1 个值广播或逐文件指定）；线宽用 `--lw` 全局控制。
 
 单组数据示例：
 
 ```bash
 python perturbo_plot/plot_kappa_vs_temperature.py \
-  --set Zr2SC BTE.KappaTensorVsT_CONV zr2sc_trans-ita.yml \
+  zr2sc_trans-ita.yml \
+  --legend pristine \
   --component avg \
-  --out kappa_vs_T.png
+  --system Zr2SC \
+  --out kappa_el_vs_T.png
 ```
 
-多组对比示例（重复 `--set`）：
+多组对比示例（多个文件 + `--legend`）：
 
 ```bash
 python perturbo_plot/plot_kappa_vs_temperature.py \
-  --set pristine BTE.KappaTensorVsT_CONV zr2sc_trans-ita.yml \
-  --set defect   defect/BTE.KappaTensorVsT_CONV defect/zr2sc_trans-ita.yml \
+  zr2sc_trans-ita.yml defect/zr2sc_trans-ita.yml \
+  --legend pristine defect \
   --component xx \
   --xlim 200,800 \
-  --out kappa_compare.png
+  --out kappa_el_compare.png
 ```
 
 ---

@@ -25,8 +25,107 @@ Key structure observed in typical files:
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+
+def apply_scienceplots_prb_style() -> None:
+    """Apply a PRB-like plotting style via SciencePlots.
+
+    This is a best-effort helper. If SciencePlots is not installed, it falls back
+    to matplotlib defaults.
+    """
+
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return
+
+    try:
+        import scienceplots  # noqa: F401
+
+        plt.style.use(["science", "no-latex"])
+    except Exception:
+        # Keep default matplotlib style.
+        return
+
+
+def apply_default_bold_rcparams() -> None:
+    """Apply a QE-like 'default' bold look (non-SciencePlots).
+
+    QE scripts historically used bold labels/ticks and thicker axes lines when not
+    using the PRB SciencePlots preset.
+    """
+
+    try:
+        import matplotlib.pyplot as plt
+
+        plt.rcParams["font.weight"] = "bold"
+        plt.rcParams["axes.labelweight"] = "bold"
+        plt.rcParams["axes.linewidth"] = 2
+    except Exception:
+        return
+
+
+def format_label(label: str, mode: str) -> str:
+    """Format a label as chemical formula (subscripts) or raw text.
+
+    mode: 'chem' or 'raw'
+    - raw: returns label unchanged
+    - chem: renders digits appearing after letters or ')' as subscripts
+    """
+
+    if not label:
+        return label
+    mode = (mode or "raw").lower()
+    if mode == "raw":
+        return label
+    if "$" in label:
+        return label
+    return re.sub(r"(?<=[A-Za-z\)])(\d+)", r"$_{\1}$", label)
+
+
+def parse_xy(s: Optional[str]) -> Optional[Tuple[float, float]]:
+    if not s:
+        return None
+    a, b = str(s).split(",", 1)
+    return float(a), float(b)
+
+
+def parse_figsize(s: Optional[str]) -> Optional[Tuple[float, float]]:
+    """Parse figure size token 'w,h' (in inches)."""
+
+    if not s:
+        return None
+    a, b = str(s).split(",", 1)
+    return float(a), float(b)
+
+
+def flatten_tokens(tokens: Optional[Sequence[str]]) -> List[str]:
+    """Flatten argparse tokens supporting comma-separated inputs."""
+
+    if not tokens:
+        return []
+    out: List[str] = []
+    for t in tokens:
+        if t is None:
+            continue
+        for s in str(t).split(","):
+            s2 = s.strip()
+            if s2:
+                out.append(s2)
+    return out
+
+
+def broadcast_list(xs: Sequence[str], n: int, name: str) -> List[str]:
+    if n <= 0:
+        return []
+    if len(xs) == n:
+        return list(xs)
+    if len(xs) == 1:
+        return [str(xs[0])] * n
+    raise SystemExit(f"{name} expects 1 value (broadcast) or {n} values, got {len(xs)}")
 
 
 def apply_plot_style(
