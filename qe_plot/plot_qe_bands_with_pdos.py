@@ -251,6 +251,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "If provided, legend placement uses both --legend-loc and this anchor."
         ),
     )
+    p.add_argument(
+        "--legend-above",
+        action="store_true",
+        help=(
+            "Place the dataset legend above the bands panel (outside axes) so it won't overlap curves. "
+            "When enabled, the legend uses a white frame by default."
+        ),
+    )
+    p.add_argument(
+        "--legend-frame",
+        action="store_true",
+        help="Draw a white legend frame (useful when legend overlaps plotted curves).",
+    )
 
     # Global system annotation (pure text)
     p.add_argument(
@@ -282,6 +295,38 @@ def _build_parser() -> argparse.ArgumentParser:
             "Optional legend anchor (bbox_to_anchor) in axes coordinates 'x,y'. "
             "If provided, legend placement uses both --system-loc and this anchor."
         ),
+    )
+    p.add_argument(
+        "--system-above",
+        action="store_true",
+        help=(
+            "Place the --system label above the bands panel (outside axes). "
+            "When enabled, the system label uses a white frame by default."
+        ),
+    )
+    p.add_argument(
+        "--system-frame",
+        action="store_true",
+        help="Draw a white frame behind the --system label.",
+    )
+
+    p.add_argument(
+        "--pdos-legend-bbox",
+        default=None,
+        help="Optional PDOS legend anchor (bbox_to_anchor) in axes coordinates 'x,y'.",
+    )
+    p.add_argument(
+        "--pdos-legend-above",
+        action="store_true",
+        help=(
+            "Place the PDOS-panel legend above the DOS panel (outside axes) to avoid overlap. "
+            "When enabled, the legend uses a white frame by default."
+        ),
+    )
+    p.add_argument(
+        "--pdos-legend-frame",
+        action="store_true",
+        help="Draw a white frame behind the PDOS legend.",
     )
 
     return p
@@ -894,6 +939,7 @@ def main() -> None:
     n0_map = _parse_n0_map(args.n0)
     legend_bbox = _parse_xy(args.legend_bbox)
     system_bbox = _parse_xy(args.system_bbox)
+    pdos_legend_bbox = _parse_xy(args.pdos_legend_bbox)
 
     # Style
     if args.style == "prb":
@@ -1203,25 +1249,43 @@ def main() -> None:
 
     leg_main = None
     if handles_leg:
+        use_frame = bool(args.legend_frame) or bool(args.legend_above)
         kwargs = dict(
             handles=handles_leg,
             loc=str(args.legend_loc),
-            frameon=False,
+            frameon=use_frame,
             borderaxespad=0.2,
             handlelength=1.8,
             handletextpad=0.6,
             labelspacing=0.35,
         )
+        if use_frame:
+            kwargs.update(dict(framealpha=1.0, facecolor="white", edgecolor="0.85"))
+
         if args.legend_fontsize is not None:
             kwargs["fontsize"] = float(args.legend_fontsize)
-        if legend_bbox is None:
-            leg_main = ax_band.legend(**kwargs)
-        else:
+
+        if args.legend_above:
+            # Put legend above axes: use axes coords with y>1 and reserve top margin later.
+            ncol = min(max(1, int(n_dataset)), 4)
+            if n_dataset <= 4:
+                ncol = int(n_dataset)
             leg_main = ax_band.legend(
                 **kwargs,
-                bbox_to_anchor=legend_bbox,
+                loc="lower center",
+                bbox_to_anchor=(0.5, 1.02),
                 bbox_transform=ax_band.transAxes,
+                ncol=ncol,
             )
+        else:
+            if legend_bbox is None:
+                leg_main = ax_band.legend(**kwargs)
+            else:
+                leg_main = ax_band.legend(
+                    **kwargs,
+                    bbox_to_anchor=legend_bbox,
+                    bbox_transform=ax_band.transAxes,
+                )
 
     # Global system annotation legend (pure text)
     if args.system is not None and str(args.system).strip():
@@ -1238,28 +1302,40 @@ def main() -> None:
         if leg_main is not None:
             ax_band.add_artist(leg_main)
 
-        if system_bbox is None:
+        use_sys_frame = bool(args.system_frame) or bool(args.system_above)
+        sys_kwargs = dict(
+            handles=[h],
+            frameon=use_sys_frame,
+            handlelength=0,
+            handletextpad=0.0,
+            borderaxespad=0.2,
+            fontsize=fs,
+        )
+        if use_sys_frame:
+            sys_kwargs.update(dict(framealpha=1.0, facecolor="white", edgecolor="0.85"))
+
+        if args.system_above:
+            # Put system label above axes. If user supplied --system-bbox, honor it.
+            anchor = system_bbox if system_bbox is not None else (0.5, 1.12)
             leg_sys = ax_band.legend(
-                handles=[h],
-                loc=str(args.system_loc),
-                frameon=False,
-                handlelength=0,
-                handletextpad=0.0,
-                borderaxespad=0.2,
-                fontsize=fs,
+                **sys_kwargs,
+                loc="lower center",
+                bbox_to_anchor=anchor,
+                bbox_transform=ax_band.transAxes,
             )
         else:
-            leg_sys = ax_band.legend(
-                handles=[h],
-                loc=str(args.system_loc),
-                bbox_to_anchor=system_bbox,
-                bbox_transform=ax_band.transAxes,
-                frameon=False,
-                handlelength=0,
-                handletextpad=0.0,
-                borderaxespad=0.2,
-                fontsize=fs,
-            )
+            if system_bbox is None:
+                leg_sys = ax_band.legend(
+                    **sys_kwargs,
+                    loc=str(args.system_loc),
+                )
+            else:
+                leg_sys = ax_band.legend(
+                    **sys_kwargs,
+                    loc=str(args.system_loc),
+                    bbox_to_anchor=system_bbox,
+                    bbox_transform=ax_band.transAxes,
+                )
         if leg_sys is not None:
             for t in leg_sys.get_texts():
                 t.set_fontweight("bold")
@@ -1372,16 +1448,45 @@ def main() -> None:
     # Legend on DOS panel (keeps figure interpretable even without x-axis label)
     leg_loc = str(args.pdos_legend_loc)
     leg_fs = args.pdos_legend_fontsize
-    if leg_fs is None:
-        leg = ax_dos.legend(loc=leg_loc, frameon=False)
+
+    use_pdos_frame = bool(args.pdos_legend_frame) or bool(args.pdos_legend_above)
+    pdos_kwargs = dict(
+        loc=leg_loc,
+        frameon=use_pdos_frame,
+    )
+    if leg_fs is not None:
+        pdos_kwargs["fontsize"] = float(leg_fs)
+    if use_pdos_frame:
+        pdos_kwargs.update(dict(framealpha=1.0, facecolor="white", edgecolor="0.85"))
+
+    if args.pdos_legend_above:
+        # Put PDOS legend above DOS axes; if user gave --pdos-legend-bbox, honor it.
+        ncol_p = min(max(1, int(len(ax_dos.get_lines()))), 4)
+        anchor = pdos_legend_bbox if pdos_legend_bbox is not None else (0.5, 1.02)
+        leg = ax_dos.legend(
+            **pdos_kwargs,
+            loc="lower center",
+            bbox_to_anchor=anchor,
+            bbox_transform=ax_dos.transAxes,
+            ncol=ncol_p,
+        )
     else:
-        leg = ax_dos.legend(loc=leg_loc, frameon=False, fontsize=float(leg_fs))
+        if pdos_legend_bbox is None:
+            leg = ax_dos.legend(**pdos_kwargs)
+        else:
+            leg = ax_dos.legend(
+                **pdos_kwargs,
+                bbox_to_anchor=pdos_legend_bbox,
+                bbox_transform=ax_dos.transAxes,
+            )
 
     # Tight layout and save
-    fig.tight_layout()
+    any_above = bool(args.legend_above) or bool(args.system_above) or bool(args.pdos_legend_above)
+    top = 0.92 if any_above else 1.0
+    fig.tight_layout(rect=(0, 0, 1, top))
     # If high-symmetry ticks are dense, auto-fix label overlap.
     _fix_dense_xticklabels(fig, ax_band)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, top))
     fig.savefig(args.out, dpi=300)
 
     print(f"Saved: {args.out}")
