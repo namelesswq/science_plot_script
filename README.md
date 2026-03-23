@@ -483,8 +483,6 @@ python perturbo_plot/plot_mean_free_path.py \
 python perturbo_plot/plot_kappa_vs_temperature.py \
   zr2sc_trans-ita.yml \
   --legend pristine \
-  --component avg \
-  --system Zr2SC \
   --out kappa_el_vs_T.png
 ```
 
@@ -501,7 +499,66 @@ python perturbo_plot/plot_kappa_vs_temperature.py \
 
 ---
 
-## 5) `perturbo_plot/perturbo_meanfp_io.py`
+## 5) `perturbo_plot/plot_sigma_kappa_vs_temperature.py`
+
+用途：从 `*_trans-ita.yml` 同时绘制电导率 $\sigma(T)$ 与电子热导率 $\kappa(T)$（双 y 轴：左 $\sigma$，右 $\kappa$）。
+
+补充：该脚本对样式参数采用“每个文件两条线”的输入方式：
+- `--ls/--color/--marker/--ms/--lw` 需要给 `文件数×2`（或给 2 个值广播为“σ/κ”，或给 1 个值广播到所有线）
+- 顺序固定为：`σ(file1), κ(file1), σ(file2), κ(file2), ...`
+
+也可分别用 `--ylim-sigma` / `--ylim-kappa` 设置左右 y 轴范围。
+
+示例（单文件，默认 `--component avg`）：
+
+```bash
+python perturbo_plot/plot_sigma_kappa_vs_temperature.py \
+  zr2sc_trans-ita.yml \
+  --legend pristine \
+  --system Zr2SC \
+  --out sigma_kappa_vs_T.png
+```
+
+示例（多文件对比 + 选择分量 + 为 σ/κ 分别指定样式）：
+
+```bash
+python perturbo_plot/plot_sigma_kappa_vs_temperature.py \
+  zr2sc_trans-ita.yml defect/zr2sc_trans-ita.yml \
+  --legend pristine defect \
+  --component avg \
+  --ls - -- -- - -- \
+  --color tab:red tab:red tab:blue tab:blue \
+  --marker o none s none \
+  --lw 2 2 2 2 \
+  --xlim 200,800 \
+  --out sigma_kappa_compare.png
+```
+
+---
+
+## 6) `perturbo_plot/plot_lorenz_vs_temperature.py`
+
+用途：从 `*_trans-ita.yml` 计算并绘制洛伦兹数
+
+$$
+L(T)=\frac{\kappa(T)}{\sigma(T)\,T}
+$$
+
+并用一条横向虚线标出理论值 $L_0=2.44\times10^{-8}\;\mathrm{W\Omega/K^2}$。
+
+示例：
+
+```bash
+python perturbo_plot/plot_lorenz_vs_temperature.py \
+  zr2sc_trans-ita.yml \
+  --legend pristine \
+  --component avg \
+  --out lorenz_vs_T.png
+```
+
+---
+
+## 7) `perturbo_plot/perturbo_meanfp_io.py`
 
 这是 meanfp 系列脚本共用的 I/O 与绘图工具模块（读取 YAML、分箱统计、统一粗体/科学计数法样式等），一般不需要直接运行。
 
