@@ -156,6 +156,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     p.add_argument(
+        "--label-fontsize",
+        type=float,
+        default=None,
+        help="Font size for axis labels and tick labels. If omitted, keep defaults/style behavior.",
+    )
+
+    p.add_argument(
         "--figsize",
         default=None,
         help='Figure size "width,height" in inches.',
@@ -189,11 +196,53 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     p.add_argument(
-        "--legend-loc",
+        "--dos-legend-loc",
         default="best",
         help="Legend location inside the DOS panel (matplotlib loc=...) [default: best]",
     )
-    p.add_argument("--legend-fontsize", type=float, default=None, help="Legend fontsize")
+    p.add_argument("--dos-legend-fontsize", type=float, default=None, help="DOS legend fontsize")
+    p.add_argument(
+        "--dos-legend-bbox",
+        default=None,
+        help="Optional DOS legend anchor (bbox_to_anchor) in axes coordinates 'x,y'.",
+    )
+
+    # Dataset legend (same interface as plot_qe_bands_with_pdos.py)
+    p.add_argument(
+        "--legend",
+        default=None,
+        nargs="+",
+        help=(
+            "Legend label(s) for each dataset. Provide one per dataset, or a single value to broadcast. "
+            "Pass a blank label (e.g. --legend ' ') to hide that dataset's legend entry. "
+            "If omitted, uses filename stem."
+        ),
+    )
+    p.add_argument(
+        "--legend-format",
+        choices=["chem", "raw"],
+        default="chem",
+        help="Render --legend text as chemical formula with subscripts (chem) or raw text (raw). Default: chem.",
+    )
+    p.add_argument(
+        "--legend-fontsize",
+        type=float,
+        default=None,
+        help="Font size for dataset legend text (left panel). If omitted, uses an automatic larger size.",
+    )
+    p.add_argument(
+        "--legend-loc",
+        default="upper left",
+        help="Legend location for dataset legend (matplotlib legend loc). Default: upper left.",
+    )
+    p.add_argument(
+        "--legend-bbox",
+        default=None,
+        help=(
+            "Optional dataset legend anchor (bbox_to_anchor) in axes coordinates 'x,y'. "
+            "If provided, legend placement uses both --legend-loc and this anchor."
+        ),
+    )
 
     p.add_argument("--out", default="phonon_bands_dos.png", help="Output image path")
     p.add_argument("--show", action="store_true", help="Show interactively")
@@ -204,9 +253,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         nargs="+",
         help=(
-            "System label(s) used as curve labels (bands and total DOS). "
-            "Provide one per dataset, e.g. '--system Zr2SC Zr15S8C8'. "
-            "If only one label is given, it is broadcast. Comma-separated tokens are also accepted."
+            "Global system annotation shown on the bands panel (pure text), independent of --legend. "
+            "Pass a blank label (e.g. --system ' ') to hide."
         ),
     )
     p.add_argument(
@@ -223,8 +271,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--system-loc",
-        default="upper left",
-        help="Legend location for --system (matplotlib legend loc). Default: upper left.",
+        default="upper right",
+        help="Location for --system annotation (matplotlib legend loc). Default: upper right.",
     )
 
     p.add_argument(
@@ -330,6 +378,22 @@ def _flatten_tokens(tokens: Optional[Sequence[str]]) -> Optional[List[str]]:
             if p:
                 out.append(p)
     return out if out else None
+
+
+def _flatten_tokens_allow_blank(tokens: Optional[Sequence[str]]) -> Optional[List[str]]:
+    """Flatten tokens splitting by comma but keep blanks.
+
+    This is useful for legend labels where an explicitly blank token
+    (e.g. --system ' ') means "hide legend".
+    """
+
+    if tokens is None:
+        return None
+    out: List[str] = []
+    for tok in tokens:
+        for part in str(tok).split(","):
+            out.append(part.strip())
+    return out
 
 
 def _parse_csv_ints(s: Optional[str]) -> Optional[List[int]]:
@@ -869,6 +933,8 @@ def main() -> None:
     figsize_dos = _parse_figsize(args.figsize_dos)
     ratios = _parse_ratios(args.ratios)
     system_bbox = _parse_xy(args.system_bbox)
+    legend_bbox = _parse_xy(args.legend_bbox)
+    dos_legend_bbox = _parse_xy(args.dos_legend_bbox)
 
     if args.lw is not None and float(args.lw) <= 0:
         raise SystemExit("--lw must be > 0")
@@ -884,7 +950,15 @@ def main() -> None:
     kpath_paths = list(args.kpath) if args.kpath is not None else []
 
     norms_in = _parse_int_list(args.dos_norm, opt_name="--dos-norm")
-    systems_in = _flatten_tokens(args.system)
+    # Dataset labels: prefer --legend; otherwise use filename stem.
+    legends_in = _flatten_tokens_allow_blank(args.legend) if (args.legend is not None) else None
+
+    # Global system annotation text (independent of dataset legend)
+    system_text: Optional[str] = None
+    if args.system is not None:
+        system_text = " ".join(str(x) for x in args.system).strip()
+        if not system_text:
+            system_text = None
 
     n_cases = max(
         len(freq_paths),
@@ -905,10 +979,12 @@ def main() -> None:
 
     norms = _broadcast_list("--dos-norm", norms_in or [1], n_cases)
 
-    if systems_in is None:
-        systems = [Path(p).stem for p in dos_paths]
+    if args.legend is not None:
+        dataset_labels_raw = _broadcast_list("--legend", legends_in or [""], n_cases)
     else:
-        systems = _broadcast_list("--system", systems_in, n_cases)
+        dataset_labels_raw = [Path(p).stem for p in dos_paths]
+
+    dataset_labels = list(dataset_labels_raw)
 
     # --- Figure layout ---
     if (figsize_bands is None) ^ (figsize_dos is None):
@@ -967,9 +1043,11 @@ def main() -> None:
     if n_cases > 1:
         print(f"Detected {n_cases} datasets. Total DOS and PDOS are plotted on the right panel.")
 
+    dataset_linestyles = ["-", "--", ":", "-."]
+
     # Data containers for DOS panel
-    dos_curves: List[Tuple[np.ndarray, np.ndarray, str, str]] = []  # (dos, freq, color, label)
-    pdos_cases: List[Tuple[np.ndarray, Dict[str, np.ndarray], str]] = []  # (freq, {base_label:pdos}, system_label)
+    dos_curves: List[Tuple[np.ndarray, np.ndarray, int, str]] = []  # (dos, freq, dataset_index, label)
+    pdos_cases: List[Tuple[np.ndarray, Dict[str, np.ndarray], int, str]] = []  # (freq, {base_label:pdos}, dataset_index, ds_label)
 
     for ic in range(n_cases):
         freq_path = str(freq_paths[ic])
@@ -1061,8 +1139,13 @@ def main() -> None:
             dos_tot = dos_tot / float(norm)
             pdos_mat = pdos_mat / float(norm)
 
-        sys_lab = _format_system_label(str(systems[ic]), str(args.system_format))
-        dos_curves.append((dos_tot, freq_dos, col, sys_lab))
+        # Dataset legend label (formatted)
+        fmt_mode = str(args.legend_format)
+        ds_lab = _format_system_label(str(dataset_labels[ic]).strip(), fmt_mode)
+        # Total DOS label used for DOS legend.
+        ds_prefix = ds_lab.strip() if ds_lab.strip() else (f"D{ic+1}" if n_cases > 1 else "")
+        tot_lab = f"{ds_prefix}:Total" if ds_prefix else "Total"
+        dos_curves.append((dos_tot, freq_dos, ic, tot_lab))
 
         if plot_pdos:
             elements_filter: Optional[set[str]] = None
@@ -1092,7 +1175,7 @@ def main() -> None:
                 for el in sorted(by_el.keys()):
                     series_case[el] = by_el[el]
 
-            pdos_cases.append((freq_dos, series_case, sys_lab))
+            pdos_cases.append((freq_dos, series_case, ic, ds_lab))
 
     if ref_xticks is None or ref_xticklabels is None or ref_xlim is None:
         raise SystemExit("No dataset loaded")
@@ -1112,70 +1195,128 @@ def main() -> None:
     ylab = "Frequency (THz)" if args.unit == "THz" else "Frequency (cm^-1)"
     ax_band.set_ylabel(ylab)
 
-    # System legend (single or multi-dataset)
-    if systems:
-        handles: List[Line2D] = []
+    if args.label_fontsize is not None:
+        fs = float(args.label_fontsize)
+        ax_band.xaxis.label.set_size(fs)
+        ax_band.yaxis.label.set_size(fs)
+        ax_band.tick_params(axis="both", which="both", labelsize=fs)
+        ax_dos.tick_params(axis="both", which="both", labelsize=fs)
+        try:
+            ax_band.xaxis.get_offset_text().set_size(fs)
+            ax_band.yaxis.get_offset_text().set_size(fs)
+            ax_dos.xaxis.get_offset_text().set_size(fs)
+            ax_dos.yaxis.get_offset_text().set_size(fs)
+        except Exception:
+            pass
+
+    # Dataset legend (left panel). Labels come from --legend (or filename stem). Skip blank labels.
+    leg_ds = None
+    if any(str(s).strip() for s in dataset_labels):
+        handles_ds: List[Line2D] = []
         for ic in range(n_cases):
-            sys_lab = _format_system_label(str(systems[ic]), str(args.system_format))
+            raw = str(dataset_labels[ic]).strip()
+            if not raw:
+                continue
+            ds_lab = _format_system_label(raw, str(args.legend_format))
             col = case_colors[ic % len(case_colors)]
-            handles.append(Line2D([0], [0], color=col, lw=lw, label=sys_lab))
+            handles_ds.append(Line2D([0], [0], color=col, lw=lw, label=ds_lab))
 
-        fs = args.system_fontsize
-        if fs is None:
+        fs_ds = args.legend_fontsize
+        if fs_ds is None:
             try:
-                fs = float(ax_band.yaxis.label.get_size()) * 1.15
+                fs_ds = float(ax_band.yaxis.label.get_size()) * 1.15
             except Exception:
-                fs = None
+                fs_ds = None
 
+        if handles_ds:
+            if legend_bbox is None:
+                leg_ds = ax_band.legend(
+                    handles=handles_ds,
+                    loc=str(args.legend_loc),
+                    frameon=False,
+                    fontsize=fs_ds,
+                )
+            else:
+                leg_ds = ax_band.legend(
+                    handles=handles_ds,
+                    loc=str(args.legend_loc),
+                    bbox_to_anchor=legend_bbox,
+                    bbox_transform=ax_band.transAxes,
+                    frameon=False,
+                    fontsize=fs_ds,
+                )
+            if leg_ds is not None:
+                for t in leg_ds.get_texts():
+                    t.set_fontweight("bold")
+
+    # Global system annotation (pure text). Independent of dataset legend.
+    if system_text is not None:
+        sys_lab = _format_system_label(system_text, str(args.system_format))
+
+        fs_sys = args.system_fontsize
+        if fs_sys is None:
+            try:
+                fs_sys = float(ax_band.yaxis.label.get_size()) * 1.15
+            except Exception:
+                fs_sys = None
+
+        if leg_ds is not None:
+            ax_band.add_artist(leg_ds)
+
+        h = Line2D([0], [0], color="none", lw=0.0, label=sys_lab)
         if system_bbox is None:
             leg_sys = ax_band.legend(
-                handles=handles,
+                handles=[h],
                 loc=str(args.system_loc),
                 frameon=False,
-                fontsize=fs,
+                fontsize=fs_sys,
+                handlelength=0,
+                handletextpad=0,
             )
         else:
             leg_sys = ax_band.legend(
-                handles=handles,
+                handles=[h],
                 loc=str(args.system_loc),
                 bbox_to_anchor=system_bbox,
                 bbox_transform=ax_band.transAxes,
                 frameon=False,
-                fontsize=fs,
+                fontsize=fs_sys,
+                handlelength=0,
+                handletextpad=0,
             )
         if leg_sys is not None:
             for t in leg_sys.get_texts():
                 t.set_fontweight("bold")
 
     # --- Plot rotated DOS/PDOS (x = DOS, y = Frequency) ---
+    # Colors: total DOS = black; PDOS cycles red/green/blue.
+    total_dos_color = "black"
+    pdos_colors = ["tab:red", "tab:green", "tab:blue"]
+
     # Total DOS curves for each dataset
-    for dos_tot, freq_dos, col, _lab in dos_curves:
-        ax_dos.plot(dos_tot, freq_dos, color=col, lw=lw, label=_lab)
+    for dos_tot, freq_dos, ic, lab in dos_curves:
+        ls_i = dataset_linestyles[ic % len(dataset_linestyles)] if n_cases > 1 else "-"
+        ax_dos.plot(dos_tot, freq_dos, color=total_dos_color, lw=lw, linestyle=ls_i, label=lab)
 
-    # PDOS colors: every PDOS curve gets its own color (even across datasets),
-    # and PDOS colors must not collide with total DOS colors.
-    # Use the second half of tab20 (lighter variants) for better separation.
-    def _rgba_key(c: object) -> Tuple[float, float, float, float]:
-        r, g, b, a = mcolors.to_rgba(c)
-        return (round(float(r), 4), round(float(g), 4), round(float(b), 4), round(float(a), 4))
-
-    used_total_rgba = {_rgba_key(col) for (_dos, _freq, col, _lab) in dos_curves}
-    tab20 = list(plt.get_cmap("tab20").colors)
-    pdos_pool = tab20[10:] + tab20[:10]
-    color_cycle = [c for c in pdos_pool if _rgba_key(c) not in used_total_rgba]
-    if not color_cycle:
-        color_cycle = list(pdos_pool)
+    # PDOS: keep colors tied to base label; datasets differ by linestyle.
+    all_base_labels: List[str] = []
+    for _freq, series_case, _ic, _dslab in pdos_cases:
+        for k in series_case.keys():
+            if k not in all_base_labels:
+                all_base_labels.append(k)
+    all_base_labels = sorted(all_base_labels)
+    base_color = {lab: pdos_colors[i % len(pdos_colors)] for i, lab in enumerate(all_base_labels)}
 
     if plot_pdos:
-        next_color = 0
-        for ic, (freq_dos, series_case, sys_lab) in enumerate(pdos_cases):
+        for freq_dos, series_case, ic, sys_lab in pdos_cases:
             if not series_case:
                 continue
+            ls_i = dataset_linestyles[ic % len(dataset_linestyles)] if n_cases > 1 else "-"
+            ds_prefix = sys_lab.strip() if sys_lab.strip() else (f"D{ic+1}" if n_cases > 1 else "")
             for base_lab in sorted(series_case.keys()):
-                col = color_cycle[next_color % len(color_cycle)]
-                next_color += 1
-                lab = f"{sys_lab}:{base_lab}"
-                ax_dos.plot(series_case[base_lab], freq_dos, lw=lw, color=col, ls="-", label=lab)
+                col = base_color.get(base_lab, pdos_colors[0])
+                lab = f"{ds_prefix}:{base_lab}" if ds_prefix else str(base_lab)
+                ax_dos.plot(series_case[base_lab], freq_dos, lw=lw, color=col, linestyle=ls_i, label=lab)
 
     if dos_xlim:
         ax_dos.set_xlim(*dos_xlim)
@@ -1190,7 +1331,7 @@ def main() -> None:
                 if np.any(m):
                     xmax = max(xmax, float(np.nanmax(dos_tot[m])))
         if plot_pdos:
-            for freq_arr, series_case, _sys_lab in pdos_cases:
+            for freq_arr, series_case, _ic, _sys_lab in pdos_cases:
                 if not series_case:
                     continue
                 m = (freq_arr >= y0) & (freq_arr <= y1)
@@ -1208,22 +1349,45 @@ def main() -> None:
 
     # Keep DOS panel compact but show x-axis tick values
     if args.unit == "THz":
-        ax_dos.set_xlabel("Phonon DOS\n(states/THz/unit cell)")
+        ax_dos.set_xlabel("(states/THz/unit cell)")
     else:
-        ax_dos.set_xlabel(r"Phonon DOS\n(states/cm$^{-1}$/unit cell)")
-    try:
-        ax_dos.xaxis.label.set_fontsize(ax_band.xaxis.label.get_size() * 0.85)
-    except Exception:
-        pass
-    ax_dos.tick_params(axis="x", which="both", bottom=True, top=False, labelbottom=True)
+        ax_dos.set_xlabel(r"(states/cm$^{-1}$/unit cell)")
+
+    if args.label_fontsize is not None:
+        try:
+            ax_dos.xaxis.label.set_fontsize(float(args.label_fontsize) * 0.85)
+        except Exception:
+            pass
+        ax_dos.tick_params(
+            axis="x",
+            which="both",
+            bottom=True,
+            top=False,
+            labelbottom=True,
+            labelsize=float(args.label_fontsize),
+        )
+    else:
+        try:
+            ax_dos.xaxis.label.set_fontsize(ax_band.xaxis.label.get_size() * 0.85)
+        except Exception:
+            pass
+        ax_dos.tick_params(axis="x", which="both", bottom=True, top=False, labelbottom=True)
 
     leg = None
-    if plot_pdos:
-        leg_fs = args.legend_fontsize
-        if leg_fs is None:
-            leg = ax_dos.legend(loc=str(args.legend_loc), frameon=False)
+    handles_d, labels_d = ax_dos.get_legend_handles_labels()
+    if handles_d and labels_d:
+        dos_loc = str(args.dos_legend_loc)
+        dos_fs = args.dos_legend_fontsize
+        if dos_legend_bbox is None:
+            leg = ax_dos.legend(loc=dos_loc, frameon=False, fontsize=(float(dos_fs) if dos_fs is not None else None))
         else:
-            leg = ax_dos.legend(loc=str(args.legend_loc), frameon=False, fontsize=float(leg_fs))
+            leg = ax_dos.legend(
+                loc=dos_loc,
+                bbox_to_anchor=dos_legend_bbox,
+                bbox_transform=ax_dos.transAxes,
+                frameon=False,
+                fontsize=(float(dos_fs) if dos_fs is not None else None),
+            )
 
     if args.style == "default":
         ax_band.grid(True, alpha=0.25)

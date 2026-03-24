@@ -27,6 +27,28 @@ class Series:
     values: List[float]
 
 
+def _normalize_linestyle_token(s: str) -> str:
+    """Normalize user-friendly linestyle aliases.
+
+    Note: passing a bare '--' token on the CLI is interpreted by argparse as
+    end-of-options. Use 'dashed' instead, or comma-separated input like:
+    --ls-kappa dashed
+    """
+
+    t = str(s).strip().lower()
+    aliases = {
+        "solid": "-",
+        "dash": "--",
+        "dashed": "--",
+        "dashdash": "--",
+        "dot": ":",
+        "dotted": ":",
+        "dashdot": "-.",
+        "dash-dot": "-.",
+    }
+    return aliases.get(t, str(s))
+
+
 def _broadcast_float_list(xs: Sequence[float], n: int, name: str) -> List[float]:
     if len(xs) == n:
         return [float(x) for x in xs]
@@ -181,6 +203,14 @@ def _parse_lim(s: Optional[str]) -> Optional[Tuple[float, float]]:
     return float(a), float(b)
 
 
+def _require_lim_order(lim: Optional[Tuple[float, float]], name: str) -> None:
+    if lim is None:
+        return
+    lo, hi = lim
+    if not (lo < hi):
+        raise SystemExit(f"{name} expects ymin<ymax, but got {lo},{hi}")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
@@ -233,6 +263,38 @@ def _build_parser() -> argparse.ArgumentParser:
             "Examples: 'black', 'tab:red', '#1f77b4'."
         ),
     )
+
+    p.add_argument(
+        "--color-sigma",
+        default="tab:blue",
+        help="Color for σ(T) curves [default: tab:blue].",
+    )
+    p.add_argument(
+        "--color-kappa",
+        default="tab:red",
+        help="Color for κ(T) curves [default: tab:red].",
+    )
+    p.add_argument(
+        "--color-lorenz",
+        default="tab:green",
+        help="Color for L(T) curves [default: tab:green].",
+    )
+
+    p.add_argument(
+        "--ls-sigma",
+        default="-",
+        help="Linestyle for σ(T) curves [default: -].",
+    )
+    p.add_argument(
+        "--ls-kappa",
+        default="dashed",
+        help="Linestyle for κ(T) curves. Use 'dashed' for '--' [default: dashed].",
+    )
+    p.add_argument(
+        "--ls-lorenz",
+        default=":",
+        help="Linestyle for L(T) curves [default: :].",
+    )
     p.add_argument(
         "--marker",
         default=None,
@@ -255,10 +317,32 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lw", type=float, default=2.0, help="Line width (default: 2.0)")
 
     p.add_argument(
+        "--label-fontsize",
+        type=float,
+        default=None,
+        help="Font size for x/y axis labels (applies to all axes). If omitted, keep the default.",
+    )
+    p.add_argument(
+        "--right-axis-spacing",
+        type=float,
+        default=0.06,
+        help=(
+            "Spacing between the two right y-axes (kappa vs Lorenz). "
+            "Lorenz axis spine is placed at x = 1 + spacing in axes coordinates [default: 0.06]."
+        ),
+    )
+
+    p.add_argument(
         "--legend-fontsize",
         type=float,
         default=None,
         help="Font size for legend text. If omitted, uses matplotlib default.",
+    )
+    p.add_argument(
+        "--legend-ncol",
+        type=int,
+        default=1,
+        help="Number of columns in the main legend [default: 1].",
     )
     p.add_argument(
         "--legend-loc",
@@ -301,6 +385,21 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--xlim", default=None, help='x limits "xmin,xmax" in K')
     p.add_argument(
+        "--ylim-sigma",
+        default=None,
+        help='y limits for σ axis "ymin,ymax" (optional)',
+    )
+    p.add_argument(
+        "--ylim-kappa",
+        default=None,
+        help='y limits for κ axis "ymin,ymax" (optional)',
+    )
+    p.add_argument(
+        "--ylim-lorenz",
+        default=None,
+        help='y limits for Lorenz axis "ymin,ymax" (optional)',
+    )
+    p.add_argument(
         "--figsize",
         default=None,
         help='Figure size "width,height" in inches (e.g. "7.2,4.6"). If omitted, uses the default size.',
@@ -317,12 +416,18 @@ def main() -> None:
     if args.lw <= 0:
         raise SystemExit("--lw must be > 0")
 
+    if args.right_axis_spacing <= 0:
+        raise SystemExit("--right-axis-spacing must be > 0")
+
     if args.style == "prb":
         apply_scienceplots_prb_style()
     else:
         apply_default_bold_rcparams()
 
     n_files = len(args.files)
+
+    if args.legend_ncol <= 0:
+        raise SystemExit("--legend-ncol must be >= 1")
 
     legends_in = flatten_tokens(args.legend)
     if legends_in:
@@ -331,18 +436,13 @@ def main() -> None:
         legends_raw = [default_label(f) for f in args.files]
     legends = [format_label(str(x), str(args.legend_format)) for x in legends_raw]
 
+    if args.color is not None:
+        raise SystemExit(
+            "--color (per-file colors) is deprecated for this script now. "
+            "Use --color-sigma/--color-kappa/--color-lorenz to set colors per variable."
+        )
+
     default_markers = ["o", "s", "^", "D", "v", ">", "<", "p", "h", "x", "+", "*"]
-
-    if n_files <= 10:
-        default_colors: List[object] = [plt.get_cmap("tab10")(i) for i in range(n_files)]
-    else:
-        default_colors = [plt.get_cmap("tab20")(i % 20) for i in range(n_files)]
-
-    colors_in = flatten_tokens(args.color)
-    if colors_in:
-        colors: List[object] = broadcast_list(colors_in, n_files, "--color")
-    else:
-        colors = list(default_colors)
 
     markers_in = flatten_tokens(args.marker)
     if markers_in:
@@ -362,6 +462,12 @@ def main() -> None:
         raise SystemExit("--ms must be > 0")
 
     xlim = _parse_lim(args.xlim)
+    ylim_sigma = _parse_lim(args.ylim_sigma)
+    ylim_kappa = _parse_lim(args.ylim_kappa)
+    ylim_lorenz = _parse_lim(args.ylim_lorenz)
+    _require_lim_order(ylim_sigma, "--ylim-sigma")
+    _require_lim_order(ylim_kappa, "--ylim-kappa")
+    _require_lim_order(ylim_lorenz, "--ylim-lorenz")
     figsize_override = parse_figsize(args.figsize)
 
     legend_bbox = parse_xy(args.legend_bbox)
@@ -374,7 +480,8 @@ def main() -> None:
 
     ax_kappa = ax_sigma.twinx()
     ax_lorenz = ax_sigma.twinx()
-    ax_lorenz.spines["right"].set_position(("axes", 1.12))
+    lorenz_spine_x = 1.0 + float(args.right_axis_spacing)
+    ax_lorenz.spines["right"].set_position(("axes", lorenz_spine_x))
     ax_lorenz.set_frame_on(True)
     ax_lorenz.patch.set_visible(False)
 
@@ -382,9 +489,13 @@ def main() -> None:
 
     # Use different linestyles for different quantities.
     # Keep per-file color/marker consistent.
-    ls_sigma = "-"
-    ls_kappa = "--"
-    ls_lorenz = ":"
+    ls_sigma = _normalize_linestyle_token(str(args.ls_sigma))
+    ls_kappa = _normalize_linestyle_token(str(args.ls_kappa))
+    ls_lorenz = _normalize_linestyle_token(str(args.ls_lorenz))
+
+    c_sigma = str(args.color_sigma)
+    c_kappa = str(args.color_kappa)
+    c_lorenz = str(args.color_lorenz)
 
     for i, (path, ds_label) in enumerate(zip(args.files, legends)):
         marker = markers[i]
@@ -419,7 +530,7 @@ def main() -> None:
         ax_sigma.plot(
             t,
             sigma,
-            color=colors[i],
+            color=c_sigma,
             lw=float(args.lw),
             linestyle=ls_sigma,
             marker=marker,
@@ -430,18 +541,18 @@ def main() -> None:
         ax_kappa.plot(
             t,
             kappa,
-            color=colors[i],
+            color=c_kappa,
             lw=float(args.lw),
             linestyle=ls_kappa,
             marker=marker,
             markersize=float(marker_sizes[i]),
             markeredgewidth=0.0,
-            label=f"{ds_label} $\\kappa$",
+            label=f"{ds_label} $\\kappa_{{el}}$",
         )
         ax_lorenz.plot(
             t,
             lorenz,
-            color=colors[i],
+            color=c_lorenz,
             lw=float(args.lw),
             linestyle=ls_lorenz,
             marker=marker,
@@ -450,18 +561,35 @@ def main() -> None:
             label=f"{ds_label} $L$",
         )
 
+    # Theoretical (Sommerfeld) Lorenz number reference line
+    # Use the same color as L(T) curves to avoid introducing new colors.
+    L0 = 2.44e-8  # WΩ/K^2
+    ax_lorenz.axhline(
+        L0,
+        color="gray",
+        linestyle="--",
+        lw=float(args.lw) * 0.9,
+        alpha=0.8,
+        label=r"Theory $L_0$",
+    )
+
     ax_sigma.set_xlabel("Temperature (K)")
-    ax_sigma.set_ylabel(r"Electrical conductivity $\sigma$")
-    ax_kappa.set_ylabel(r"Thermal conductivity $\kappa$ (W/mK)")
+    ax_sigma.set_ylabel(r"Electrical conductivity $\sigma$ (S/m)")
+    ax_kappa.set_ylabel(r"Thermal conductivity $\kappa_{el}$ (W/mK)")
     ax_lorenz.set_ylabel(r"Lorenz number $L=\kappa/(\sigma T)$ (W$\Omega$/K$^2$)")
 
     if xlim:
         ax_sigma.set_xlim(*xlim)
 
+    if ylim_sigma:
+        ax_sigma.set_ylim(*ylim_sigma)
+    if ylim_kappa:
+        ax_kappa.set_ylim(*ylim_kappa)
+    if ylim_lorenz:
+        ax_lorenz.set_ylim(*ylim_lorenz)
+
     if args.title:
         ax_sigma.set_title(args.title)
-    else:
-        ax_sigma.set_title(f"$\\sigma$, $\\kappa$, and $L$ vs T ({comp})")
 
     if args.style != "prb":
         ax_sigma.grid(True, alpha=0.25)
@@ -480,7 +608,7 @@ def main() -> None:
             labels,
             loc=str(args.legend_loc),
             frameon=False,
-            ncols=1,
+            ncols=int(args.legend_ncol),
             fontsize=args.legend_fontsize,
         )
     else:
@@ -491,7 +619,7 @@ def main() -> None:
             bbox_to_anchor=legend_bbox,
             bbox_transform=ax_sigma.transAxes,
             frameon=False,
-            ncols=1,
+            ncols=int(args.legend_ncol),
             fontsize=args.legend_fontsize,
         )
 
@@ -532,6 +660,37 @@ def main() -> None:
     apply_plot_style(ax_sigma, legend=leg, bold=(args.style != "prb"), sci_y="auto", ylog=False)
     apply_plot_style(ax_kappa, legend=None, bold=(args.style != "prb"), sci_y="auto", ylog=False)
     apply_plot_style(ax_lorenz, legend=None, bold=(args.style != "prb"), sci_y="auto", ylog=False)
+
+    if args.label_fontsize is not None:
+        fs = float(args.label_fontsize)
+        if fs <= 0:
+            raise SystemExit("--label-fontsize must be > 0")
+        for a in (ax_sigma, ax_kappa, ax_lorenz):
+            a.xaxis.label.set_size(fs)
+            a.yaxis.label.set_size(fs)
+            a.tick_params(axis="both", which="both", labelsize=fs)
+
+            # Keep scientific-notation offset text consistent when visible.
+            try:
+                a.xaxis.get_offset_text().set_size(fs)
+            except Exception:
+                pass
+            try:
+                a.yaxis.get_offset_text().set_size(fs)
+            except Exception:
+                pass
+
+    ax_lorenz.yaxis.get_offset_text().set_visible(False)
+
+    ax_lorenz.text(
+        lorenz_spine_x,
+        1.01,
+        r"$\times 10^{-8}$",
+        transform=ax_lorenz.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=(float(args.label_fontsize) if args.label_fontsize is not None else ax_lorenz.yaxis.label.get_size()),
+    )
 
     # Reserve extra right margin for the 3rd (offset) y-axis.
     fig.tight_layout(rect=(0.0, 0.0, 0.86, 1.0))

@@ -171,6 +171,13 @@ def _build_parser() -> argparse.ArgumentParser:
             "(currently ~0.8 for prb and larger for default)."
         ),
     )
+
+    p.add_argument(
+        "--label-fontsize",
+        type=float,
+        default=None,
+        help="Font size for axis labels (x/y). If omitted, keep the default/style behavior.",
+    )
     p.add_argument(
         "--figsize",
         default=None,
@@ -397,6 +404,25 @@ def _flatten_tokens(tokens: Optional[Sequence[str]]) -> List[str]:
             s2 = s.strip()
             if s2:
                 out.append(s2)
+    return out
+
+
+def _flatten_tokens_allow_blank(tokens: Optional[Sequence[str]]) -> List[str]:
+    """Flatten comma-separated tokens but keep blanks.
+
+    This is useful for arguments like --legend where an explicitly blank token
+    (e.g. --legend ' ') is meaningful (it disables that legend entry).
+    """
+
+    if tokens is None:
+        return []
+    out: List[str] = []
+    for t in tokens:
+        if t is None:
+            continue
+        parts = str(t).split(",")
+        for s in parts:
+            out.append(s.strip())
     return out
 
 
@@ -973,8 +999,8 @@ def main() -> None:
         if nv is not None and float(nv) == 0.0:
             raise SystemExit(f"--norm must be non-zero (dataset#{i+1})")
 
-    legends_flat = _flatten_tokens(args.legend)
-    if legends_flat:
+    legends_flat = _flatten_tokens_allow_blank(args.legend)
+    if args.legend is not None:
         legends = _broadcast_list([str(x) for x in legends_flat], n_dataset, "--legend")
     else:
         legends = [Path(str(p)).name for p in bands_paths]
@@ -1243,6 +1269,8 @@ def main() -> None:
     # Dataset legend (colored lines)
     handles_leg: List[Line2D] = []
     for i in range(n_dataset):
+        if not str(legends[i]).strip():
+            continue
         lab = _format_system_label(str(legends[i]), str(args.legend_format))
         color_i = dataset_colors[i % len(dataset_colors)]
         handles_leg.append(Line2D([], [], color=color_i, lw=lw_band, label=lab))
@@ -1341,62 +1369,39 @@ def main() -> None:
                 t.set_fontweight("bold")
 
     # --- Plot rotated DOS/PDOS (x = DOS, y = Energy) ---
-    # Total DOS (optional)
-    total_rgbs: List[Tuple[float, float, float]] = []
-    for i in range(min(n_dataset, len(dataset_colors))):
-        try:
-            total_rgbs.append(tuple(float(x) for x in to_rgb(dataset_colors[i])))
-        except Exception:
-            pass
-
-    pdos_color_pool: List[Tuple[float, float, float]] = []
-    for cmap_name in ("tab20", "tab20b", "tab20c"):
-        try:
-            cols = list(plt.get_cmap(cmap_name).colors)
-        except Exception:
-            continue
-        for c in cols:
-            rgb = tuple(float(x) for x in c)
-            # Filter out colors too close to any total-DOS (dataset) color.
-            too_close = False
-            for tr in total_rgbs:
-                d = ((rgb[0] - tr[0]) ** 2 + (rgb[1] - tr[1]) ** 2 + (rgb[2] - tr[2]) ** 2) ** 0.5
-                if d < 0.12:
-                    too_close = True
-                    break
-            if not too_close:
-                pdos_color_pool.append(rgb)
-
-    if not pdos_color_pool:
-        pdos_color_pool = [tuple(float(x) for x in c) for c in plt.get_cmap("tab20").colors]
-
-    def pick_pdos_color(j: int, taken: List[Tuple[float, float, float]]) -> Tuple[float, float, float]:
-        for k in range(len(pdos_color_pool)):
-            cand = pdos_color_pool[(j + k) % len(pdos_color_pool)]
-            if cand in taken:
-                continue
-            return cand
-        return pdos_color_pool[j % len(pdos_color_pool)]
-
-    taken_pdos: List[Tuple[float, float, float]] = []
+    # Colors: total DOS = tab:black; PDOS cycles red/green/blue for easy distinction.
+    # When overlaying multiple datasets, use different linestyles per dataset.
+    # Note: Matplotlib's 'tab:' palette does not include 'tab:black'. Use 'black'.
+    total_dos_color = "black"
+    pdos_colors = ["tab:red", "tab:green", "tab:blue"]
+    dataset_linestyles = ["-", "--", ":", "-."]
 
     for i in range(n_dataset):
-        color_i = dataset_colors[i % len(dataset_colors)]
         alpha_i = 1.0 if i == 0 else 0.9
+        ls_i = dataset_linestyles[i % len(dataset_linestyles)] if n_dataset > 1 else "-"
         # Always prefix DOS/PDOS legend entries by dataset legend.
-        ds_prefix = str(legends[i]) if str(legends[i]).strip() else (f"D{i+1}" if n_dataset > 1 else "D1")
+        ds_prefix = str(legends[i]).strip()
+        if not ds_prefix:
+            ds_prefix = f"D{i+1}" if n_dataset > 1 else ""
 
         if plot_total:
-            lab_tot = f"{ds_prefix}:Total"
-            ax_dos.plot(dos_tot[i], dos_e_tot[i], color=color_i, lw=lw_tot, alpha=alpha_i, label=lab_tot)
+            lab_tot = f"{ds_prefix}:Total" if ds_prefix else "Total"
+            ax_dos.plot(
+                dos_tot[i],
+                dos_e_tot[i],
+                color=total_dos_color,
+                lw=lw_tot,
+                alpha=alpha_i,
+                linestyle=ls_i,
+                label=lab_tot,
+            )
 
         # PDOS
-        for lab in pdos_labels[i]:
+        for j, lab in enumerate(pdos_labels[i]):
             y = pdos_series[i][lab]
-            c = pick_pdos_color(len(taken_pdos), taken_pdos)
-            taken_pdos.append(c)
-            lab2 = f"{ds_prefix}:{lab}"
-            ax_dos.plot(y, pdos_e[i], lw=lw_pdos, color=c, alpha=alpha_i, label=lab2)
+            c = pdos_colors[j % len(pdos_colors)]
+            lab2 = f"{ds_prefix}:{lab}" if ds_prefix else str(lab)
+            ax_dos.plot(y, pdos_e[i], lw=lw_pdos, color=c, alpha=alpha_i, linestyle=ls_i, label=lab2)
 
     # Shared y decorations
     if args.fermi_line:
@@ -1432,14 +1437,30 @@ def main() -> None:
 
     # Labels: keep compact xlabel on PDOS panel and show x-axis tick values
     any_fermi = any(x is not None for x in fermi_list)
-    ax_band.set_ylabel(r"$E - E_{f}$ (eV)" if any_fermi else "Energy (eV)")
+    ax_band.set_ylabel(r"$E - E_{f}$ (eV)" if any_fermi else "Energy (eV)", labelpad=-2.0)
+    # Also reduce y-tick label padding to keep the left side compact.
+    ax_band.tick_params(axis="y", which="both", pad=2.0)
 
-    ax_dos.set_xlabel("Electron DOS\n(states/eV/unit cell)")
-    try:
-        base = ax_band.yaxis.label.get_size()
-        ax_dos.xaxis.label.set_fontsize(base * 0.85)
-    except Exception:
-        pass
+    ax_dos.set_xlabel("(states/eV/unit cell)")
+
+    # Apply user-requested label fontsize (if provided). Otherwise keep the existing
+    # behavior where DOS xlabel is slightly smaller than the bands ylabel.
+    if args.label_fontsize is not None:
+        fs = float(args.label_fontsize)
+        if fs <= 0:
+            raise SystemExit("--label-fontsize must be > 0")
+        for a in (ax_band, ax_dos):
+            a.xaxis.label.set_size(fs)
+            a.yaxis.label.set_size(fs)
+
+        # The DOS-panel xlabel is a unit label; keep it slightly smaller.
+        ax_dos.xaxis.label.set_size(fs * 0.85)
+    else:
+        try:
+            base = ax_band.yaxis.label.get_size()
+            ax_dos.xaxis.label.set_fontsize(base * 0.85)
+        except Exception:
+            pass
     ax_dos.tick_params(axis="x", which="both", bottom=True, top=False, labelbottom=True)
 
     # Hide duplicate y tick labels on the right

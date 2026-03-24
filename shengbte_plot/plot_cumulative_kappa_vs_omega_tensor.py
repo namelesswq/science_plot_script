@@ -183,6 +183,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--figsize", default=None, help='Figure size "width,height" in inches (e.g. "3.6,2.8")')
     p.add_argument("--lw", type=float, default=1.8, help="Line width (default: 1.8)")
 
+    p.add_argument(
+        "--label-fontsize",
+        type=float,
+        default=None,
+        help="Font size for axis labels and tick labels. If omitted, keep defaults/style behavior.",
+    )
+
     p.add_argument("--grid", action="store_true", help="Show grid")
     p.add_argument("--out", default="cumulative_kappa_vs_freq.png", help="Output image path")
     p.add_argument("--show", action="store_true", help="Show interactively")
@@ -363,6 +370,9 @@ def main() -> None:
     if args.lw <= 0:
         raise SystemExit("--lw must be > 0")
 
+    if args.label_fontsize is not None and float(args.label_fontsize) <= 0:
+        raise SystemExit("--label-fontsize must be > 0")
+
     if args.style == "prb":
         _apply_scienceplots_prb_style()
 
@@ -510,6 +520,20 @@ def main() -> None:
 
     ax.set_xlabel(str(args.xlabel))
     ax.set_ylabel(str(args.ylabel))
+
+    if args.label_fontsize is not None:
+        fs = float(args.label_fontsize)
+        ax.xaxis.label.set_size(fs)
+        ax.yaxis.label.set_size(fs)
+        ax.tick_params(axis="both", which="both", labelsize=fs)
+        try:
+            ax.xaxis.get_offset_text().set_size(fs)
+        except Exception:
+            pass
+        try:
+            ax.yaxis.get_offset_text().set_size(fs)
+        except Exception:
+            pass
 
     if args.ylog:
         ax.set_yscale("log")
