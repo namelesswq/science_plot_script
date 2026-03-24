@@ -163,6 +163,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    p.add_argument(
+        "--ls",
+        default=None,
+        nargs="+",
+        help=(
+            "Line style(s) for each dataset. Provide one per file, or a single value to broadcast. "
+            "Examples: '-', ':', '-.', 'dashed'. Note: do not pass a bare '--' token; use 'dashed' or comma-separated like: --ls -,-,--"
+        ),
+    )
+
     p.add_argument("--xlabel", default="Temperature (K)", help="x-axis label")
     p.add_argument("--ylabel", default=r"$\kappa_{\mathrm{latt}}$ (W/mK)", help="y-axis label")
 
@@ -233,6 +243,28 @@ def _broadcast_float_list(xs: Sequence[float], n: int, name: str) -> List[float]
     if len(xs) == 1:
         return [float(xs[0])] * n
     raise SystemExit(f"{name} expects 1 value or {n} values, but got {len(xs)}")
+
+
+def _normalize_linestyle_token(s: str) -> str:
+    """Normalize user-friendly linestyle aliases.
+
+    Note: passing a bare '--' token on the CLI is interpreted by argparse as
+    end-of-options. Use 'dashed' instead, or comma-separated input like:
+    --ls -,-,--
+    """
+
+    t = str(s).strip().lower()
+    aliases = {
+        "solid": "-",
+        "dash": "--",
+        "dashed": "--",
+        "dashdash": "--",
+        "dot": ":",
+        "dotted": ":",
+        "dashdot": "-.",
+        "dash-dot": "-.",
+    }
+    return aliases.get(t, str(s))
 
 
 def _read_kappa_tensor_vs_t(path: str) -> Tuple[np.ndarray, np.ndarray]:
@@ -328,6 +360,12 @@ def main() -> None:
     if any(m <= 0 for m in marker_sizes):
         raise SystemExit("--ms must be > 0")
 
+    if args.ls is None:
+        linestyles = ["-"] * n
+    else:
+        linestyles_raw = _broadcast_list([str(x) for x in args.ls], n, "--ls")
+        linestyles = [_normalize_linestyle_token(x) for x in linestyles_raw]
+
     fig = plt.figure(figsize=figsize) if figsize is not None else plt.figure()
     ax = fig.add_subplot(1, 1, 1)
 
@@ -340,6 +378,7 @@ def main() -> None:
             y,
             color=colors[i],
             lw=float(args.lw),
+            linestyle=str(linestyles[i]),
             marker=markers[i],
             markersize=float(marker_sizes[i]),
             markeredgewidth=0.0,
@@ -369,6 +408,7 @@ def main() -> None:
                 [],
                 color=colors[i],
                 lw=float(args.lw),
+                linestyle=str(linestyles[i]),
                 marker=markers[i],
                 markersize=float(marker_sizes[i]),
                 markeredgewidth=0.0,

@@ -48,8 +48,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         nargs="+",
         help=(
-            "Legend label(s) for each --file. Provide one per file, or a single value to broadcast. "
-            "If omitted, uses the file basename."
+            "Legend label(s). Provide 1 (broadcast), Nfile (per-file), Ncomp (per-component), or Nfile×Ncomp (per line) values. "
+            "If omitted, uses the file basename (and appends component when plotting multiple)."
         ),
     )
     p.add_argument(
@@ -112,7 +112,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p.add_argument(
         "--component",
-        default="avg",
+        default=["avg"],
+        nargs="+",
         choices=[
             "xx",
             "xy",
@@ -127,8 +128,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "trace",
         ],
         help=(
-            "Which tensor component to plot. 'avg' plots (kxx+kyy+kzz)/3. "
-            "'trace' plots (kxx+kyy+kzz). Default: avg."
+            "Tensor component(s) to plot. You can pass multiple components to overlay directions on one figure. "
+            "'avg' plots (kxx+kyy+kzz)/3. 'trace' plots (kxx+kyy+kzz). Default: avg."
+        ),
+    )
+
+    p.add_argument(
+        "--order",
+        choices=["comp-major", "file-major"],
+        default="comp-major",
+        help=(
+            "Order of plotted lines. comp-major: all files for the first component, then next component. "
+            "file-major: all components for the first file, then next file. Default: comp-major."
         ),
     )
 
@@ -141,8 +152,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         nargs="+",
         help=(
-            "Line color(s) for each dataset. Provide one per file, or a single value to broadcast. "
+            "Line color(s). Provide 1 (broadcast), Nfile (per-file), Ncomp (per-component), or Nfile×Ncomp (per line) values. "
             "Examples: 'black', 'tab:red', '#1f77b4'."
+        ),
+    )
+
+    p.add_argument(
+        "--ls",
+        default=None,
+        nargs="+",
+        help=(
+            "Line style(s). Provide 1 (broadcast), Nfile (per-file), Ncomp (per-component), or Nfile×Ncomp (per line) values. "
+            "Examples: '-', ':', '-.', 'dashed'. Note: do not pass a bare '--' token; use 'dashed' or comma-separated like: --ls -,-,--"
         ),
     )
 
@@ -212,6 +233,72 @@ def _broadcast_list(xs: Sequence[str], n: int, name: str) -> List[str]:
     if len(xs) == 1:
         return [str(xs[0])] * n
     raise SystemExit(f"{name} expects 1 value or {n} values, but got {len(xs)}")
+
+
+def _broadcast_str_grid(xs: Sequence[str], *, n_files: int, n_comp: int, name: str, order: str) -> List[str]:
+    """Broadcast to per-line list (file×component) in plotting order.
+
+    Accepted lengths: 1, n_files, n_comp, n_files*n_comp.
+    """
+
+    n_lines = n_files * n_comp
+    if n_lines == 0:
+        return []
+
+    if len(xs) == 1:
+        return [str(xs[0])] * n_lines
+
+    if len(xs) == n_files:
+        if order == "file-major":
+            out: List[str] = []
+            for v in xs:
+                out.extend([str(v)] * n_comp)
+            return out
+        out = []
+        for _ in range(n_comp):
+            for v in xs:
+                out.append(str(v))
+        return out
+
+    if len(xs) == n_comp:
+        if order == "file-major":
+            out: List[str] = []
+            for _ in range(n_files):
+                out.extend([str(v) for v in xs])
+            return out
+        out = []
+        for v in xs:
+            out.extend([str(v)] * n_files)
+        return out
+
+    if len(xs) == n_lines:
+        return [str(v) for v in xs]
+
+    raise SystemExit(
+        f"{name} expects 1, {n_files} (per-file), {n_comp} (per-component), or {n_lines} (per line; order={order}) values, but got {len(xs)}"
+    )
+
+
+def _normalize_linestyle_token(s: str) -> str:
+    """Normalize user-friendly linestyle aliases.
+
+    Note: passing a bare '--' token on the CLI is interpreted by argparse as
+    end-of-options. Use 'dashed' instead, or comma-separated input like:
+    --ls -,-,-,--,--,--
+    """
+
+    t = str(s).strip().lower()
+    aliases = {
+        "solid": "-",
+        "dash": "--",
+        "dashed": "--",
+        "dashdash": "--",
+        "dot": ":",
+        "dotted": ":",
+        "dashdot": "-.",
+        "dash-dot": "-.",
+    }
+    return aliases.get(t, str(s))
 
 
 def _broadcast_float_list(xs: Sequence[float], n: int, name: str) -> List[float]:
@@ -285,40 +372,141 @@ def main() -> None:
     legend_bbox = _parse_xy(args.legend_bbox)
     system_bbox = _parse_xy(args.system_bbox)
 
-    # Legend labels
+    components = [str(c).lower() for c in (args.component or [])]
+    if not components:
+        raise SystemExit("--component cannot be empty")
+
+    order = str(args.order)
+    n_files = len(files)
+    n_comp = len(components)
+    n_lines = n_files * n_comp
+
+    # Linestyles: per component
+    component_linestyles = ["-", "--", ":", "-."]
+
+    default_file_labels = [Path(f).name for f in files]
+
+    legends_in = [str(x) for x in args.legend] if args.legend is not None else []
+    legend_mode: str
+    legends_file: List[str] = []
+    legends_comp: List[str] = []
+    legends_line: List[str] = []
+
     if args.legend is None:
-        legend_labels = [Path(f).name for f in files]
+        legend_mode = "file"
+        legends_file = list(default_file_labels)
     else:
-        legend_labels = _broadcast_list([str(x) for x in args.legend], len(files), "--legend")
+        if len(legends_in) == 1:
+            legend_mode = "file"
+            legends_file = [legends_in[0]] * n_files
+        elif len(legends_in) == n_files:
+            legend_mode = "file"
+            legends_file = list(legends_in)
+        elif len(legends_in) == n_comp:
+            legend_mode = "comp"
+            legends_comp = list(legends_in)
+        elif len(legends_in) == n_lines:
+            legend_mode = "line"
+            legends_line = _broadcast_str_grid(legends_in, n_files=n_files, n_comp=n_comp, name="--legend", order=order)
+        else:
+            raise SystemExit(
+                f"--legend expects 1, {n_files} (per-file), {n_comp} (per-component), or {n_lines} (per line; order={order}) values, but got {len(legends_in)}"
+            )
 
-    n = len(files)
-
-    # Default colors/markers
+    # Default colors
     default_colors: List[object]
-    if n <= 10:
-        default_colors = [plt.get_cmap("tab10")(i) for i in range(n)]
+    if n_files <= 10:
+        default_colors = [plt.get_cmap("tab10")(i) for i in range(n_files)]
     else:
-        default_colors = [plt.get_cmap("tab20")(i % 20) for i in range(n)]
+        default_colors = [plt.get_cmap("tab20")(i % 20) for i in range(n_files)]
+
     if args.color is None:
-        colors = list(default_colors)
+        # Default: color by file
+        colors_line: List[object] = []
+        if order == "file-major":
+            for i in range(n_files):
+                colors_line.extend([default_colors[i]] * n_comp)
+        else:
+            for _ in range(n_comp):
+                for i in range(n_files):
+                    colors_line.append(default_colors[i])
     else:
-        colors = _broadcast_list([str(x) for x in args.color], n, "--color")
+        colors_in = [str(x) for x in args.color]
+        colors_line = _broadcast_str_grid(colors_in, n_files=n_files, n_comp=n_comp, name="--color", order=order)
+
+    # Linestyles
+    if args.ls is None:
+        linestyles_line: List[str] = []
+        if order == "file-major":
+            for _i in range(n_files):
+                for ic in range(n_comp):
+                    linestyles_line.append(component_linestyles[ic % len(component_linestyles)])
+        else:
+            for ic in range(n_comp):
+                for _i in range(n_files):
+                    linestyles_line.append(component_linestyles[ic % len(component_linestyles)])
+    else:
+        ls_in = [_normalize_linestyle_token(str(x)) for x in args.ls]
+        linestyles_line = _broadcast_str_grid(ls_in, n_files=n_files, n_comp=n_comp, name="--ls", order=order)
 
     fig = plt.figure(figsize=figsize) if figsize is not None else plt.figure()
     ax = fig.add_subplot(1, 1, 1)
 
-    # Plot
-    for i, f in enumerate(files):
-        omega_rad_ps, k9 = _read_cumulative_kappa_vs_omega_tensor(f)
-        freq_thz = np.asarray(omega_rad_ps, dtype=float) / (2.0 * np.pi)
-        y = _select_component(k9, str(args.component))
+    multi_comp = len(components) > 1
 
-        ax.plot(
+    def _line_index(i: int, ic: int) -> int:
+        if order == "file-major":
+            return i * n_comp + ic
+        return ic * n_files + i
+
+    def _line_pairs() -> List[Tuple[int, int]]:
+        if order == "file-major":
+            return [(i, ic) for i in range(n_files) for ic in range(n_comp)]
+        return [(i, ic) for ic in range(n_comp) for i in range(n_files)]
+
+    # Read all datasets once
+    omega_all: List[np.ndarray] = []
+    k9_all: List[np.ndarray] = []
+    for f in files:
+        omega_rad_ps, k9 = _read_cumulative_kappa_vs_omega_tensor(f)
+        omega_all.append(np.asarray(omega_rad_ps, dtype=float))
+        k9_all.append(np.asarray(k9, dtype=float))
+
+    # Plot (color by file, linestyle by component)
+    handles_leg: List[Line2D] = []
+    for i, ic in _line_pairs():
+        omega_rad_ps = omega_all[i]
+        k9 = k9_all[i]
+        freq_thz = omega_rad_ps / (2.0 * np.pi)
+
+        comp = components[ic]
+        y = _select_component(k9, comp)
+
+        idx_line = _line_index(i, ic)
+
+        if legend_mode == "line":
+            lab_raw = legends_line[idx_line]
+        elif legend_mode == "comp":
+            if n_files == 1:
+                lab_raw = legends_comp[ic]
+            else:
+                lab_raw = f"{default_file_labels[i]} {legends_comp[ic]}"
+        else:
+            lab_raw = legends_file[i]
+            if multi_comp:
+                lab_raw = f"{lab_raw} {comp}"
+
+        lab = _format_system_label(str(lab_raw), str(args.legend_format))
+
+        (line,) = ax.plot(
             freq_thz,
             y,
-            color=colors[i],
+            color=colors_line[idx_line],
             lw=float(args.lw),
+            linestyle=str(linestyles_line[idx_line]),
+            label=lab,
         )
+        handles_leg.append(line)
 
     ax.set_xlabel(str(args.xlabel))
     ax.set_ylabel(str(args.ylabel))
@@ -333,20 +521,6 @@ def main() -> None:
 
     if args.grid:
         ax.grid(True, linestyle="--", alpha=0.3)
-
-    # Dataset legend
-    handles_leg: List[Line2D] = []
-    for i, lab_raw in enumerate(legend_labels):
-        lab = _format_system_label(str(lab_raw), str(args.legend_format))
-        handles_leg.append(
-            Line2D(
-                [],
-                [],
-                color=colors[i],
-                lw=float(args.lw),
-                label=lab,
-            )
-        )
 
     leg_main = None
     if handles_leg:
