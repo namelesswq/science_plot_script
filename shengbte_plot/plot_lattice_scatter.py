@@ -147,6 +147,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ylabel", default=r"Scattering Rate (ps$^{-1}$)", help="y-axis label")
 
     p.add_argument(
+        "--label-fontsize",
+        type=float,
+        default=None,
+        help=(
+            "Font size for axis labels AND tick numbers. "
+            "If omitted, uses matplotlib defaults."
+        ),
+    )
+
+    p.add_argument(
         "--style",
         choices=["prb", "default"],
         default="prb",
@@ -228,6 +238,8 @@ def main() -> None:
         raise SystemExit("--alpha must be within [0, 1]")
     if args.xcol < 0 or args.ycol < 0:
         raise SystemExit("--xcol/--ycol must be >= 0")
+    if args.label_fontsize is not None and float(args.label_fontsize) <= 0:
+        raise SystemExit("--label-fontsize must be > 0")
 
     if args.style == "prb":
         _apply_scienceplots_prb_style()
@@ -310,6 +322,17 @@ def main() -> None:
 
     ax.set_xlabel(str(args.xlabel))
     ax.set_ylabel(str(args.ylabel))
+
+    if args.label_fontsize is not None:
+        fs = float(args.label_fontsize)
+        ax.xaxis.label.set_size(fs)
+        ax.yaxis.label.set_size(fs)
+        ax.tick_params(axis="both", which="both", labelsize=fs)
+        try:
+            ax.xaxis.get_offset_text().set_size(fs)
+            ax.yaxis.get_offset_text().set_size(fs)
+        except Exception:
+            pass
 
     if args.xlog:
         ax.set_xscale("log")

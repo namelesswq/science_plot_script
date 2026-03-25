@@ -96,15 +96,56 @@ python qe_plot/plot_qe_dos_pdos_overlay.py \
   --out dos_only.png
 ```
 
+只画“按元素求和的 PDOS”（不分轨道）示例：当显式传了 `--orbitals` 但内容为空白时，会进入“element-sum mode”，即：
+- 仍然会读取 PDOS 文件
+- 但只按元素把所有轨道/投影求和后画一条曲线（每个元素 1 条）
+
+```bash
+python qe_plot/plot_qe_dos_pdos_overlay.py \
+  --tot zr2sc.pdos.pdos_tot \
+  --legend Pristine \
+  --elements Zr,S,C \
+  --orbitals ' ' \
+  --merge-wfc \
+  --fermi 14.776 \
+  --fermi-line \
+  --system Zr2SC \
+  --out dos_pdos_element_sum.png
+```
+
+只画 d 的各个分量（不画 total DOS，也不画 d 的总和曲线）示例：
+- `--orbitals d,no-tot`：只保留 d 轨道，并关闭 total DOS
+- `--pdos-components d=all`：把 d 的 5 个分量都画出来
+- `--pdos-components-only`：只画分量，不画 d 的总和（ldos）
+
+```bash
+python qe_plot/plot_qe_dos_pdos_overlay.py \
+  --tot zr2sc.pdos.pdos_tot \
+  --legend Pristine \
+  --elements Zr,S,C \
+  --orbitals d,no-tot \
+  --pdos-components 'd=all' \
+  --pdos-components-only \
+  --merge-wfc \
+  --fermi 14.776 \
+  --fermi-line \
+  --system Zr2SC \
+  --out dos_pdos_d_components_only.png
+```
+
 常用参数：
 - `--pdos`：显式给出 PDOS 文件列表（不常用，文件太多时可用）
 - `--pdos-glob`：自定义 glob 模式（覆盖自动推断）
 - `--merge-wfc`：将同一元素同一轨道的不同 `wfc#` 合并为一条曲线
 - `--n0 'Zr=4,S=3,C=2'`：不合并 wfc 时，把 `wfc#` 重新标成“主量子数标签”（如 Zr-4d、Zr-5d…）
 - `--tot-col` / `--pdos-col`：指定读哪一列（0-based；默认都取第 2 列即 `col=1`）
+- `--pdos-components`：选择并绘制指定轨道的分量（m-components），如 `p=all;d=1,3,5`
+- `--pdos-components-only`：配合 `--pdos-components` 使用，只画分量，不画该轨道的总和（ldos）
 - `--legend`：每组数据的前缀标签（支持 1 个值广播到所有体系，或给 N 个值对应 N 组）
 - `--norm`：对每组 DOS/PDOS 的 y 值做归一化（除以 `norm`；同样支持广播/逐组）
 - `--style prb|default`、`--figsize 3.4,2.6`、`--ylog`、`--sci-y auto|on|off`
+- `--label-fontsize`：x/y 轴标签字号
+- `--linestyle` / `--linewidth`：按规则为不同曲线指定线型/线宽（支持 `tot`、`pdos`、`<orb>`、`<el>-<orb>`、以及 `1:`/`2:` 这类“第 N 组数据覆盖规则”；当 `--orbitals` 为空白时也可用 `zr=--` 这种“按元素”规则）
 - `--system` / `--system-format chem|raw` / `--system-fontsize` / `--system-loc` / `--system-bbox x,y`：在图内标注一个全局体系名称（`--system-bbox` 用轴坐标 0~1 精确定位）
 
 ---
@@ -236,9 +277,11 @@ python qe_plot/plot_qe_bands_with_pdos.py \
 - `--dos-xlim xmin,xmax`：限制右侧 DOS 轴范围
 - `--ratios 3,1`：面板宽度比（若没用 `--figsize-bands/--figsize-dos`，可用这个快速调比例）
 - `--n0`、`--tot-col`、`--pdos-col`：同上
+- `--pdos-components`：选择并绘制指定轨道的分量（m-components），如 `p=all;d=1,3,5`
 - `--legend`：每组数据的前缀标签（多体系时用它来区分；支持广播/逐组）
 - `--pdos-legend-loc` / `--pdos-legend-fontsize`：右侧 (P)DOS 面板的曲线图例位置/字号
 - `--norm`：对每组 DOS/PDOS 的 x 值做归一化（除以 `norm`；同样支持广播/逐组）
+- `--label-fontsize`：坐标轴标签字号（作用于能带与 DOS 面板）
 - `--system` / `--system-format chem|raw` / `--system-fontsize` / `--system-loc` / `--system-bbox x,y`：在左侧能带面板标注一个全局体系名称（`--system-bbox` 用轴坐标精确定位）
 
 ---
@@ -558,7 +601,43 @@ python perturbo_plot/plot_lorenz_vs_temperature.py \
 
 ---
 
-## 7) `perturbo_plot/perturbo_meanfp_io.py`
+## 7) `perturbo_plot/plot_sigma_kappa_lorenz_vs_temperature.py`
+
+用途：从 `*_trans-ita.yml` 在一张图里同时绘制：
+- 电导率 $\sigma(T)$（左 y 轴）
+- 电子热导率 $\kappa_{el}(T)$（右 y 轴）
+- 洛伦兹数 $L(T)=\kappa/(\sigma T)$（第二个右 y 轴，会向右偏移一段距离）
+
+补充：
+- 该脚本使用 `--color-sigma/--color-kappa/--color-lorenz` 分别控制三类曲线颜色；`--color`（逐文件）已废弃，会直接报错提示。
+- `--ls-kappa` 默认是 `dashed`（因为命令行里裸的 `--` 会被 argparse 当作“选项结束”）。
+
+示例（单文件，默认 `--component avg`）：
+
+```bash
+python perturbo_plot/plot_sigma_kappa_lorenz_vs_temperature.py \
+  zr2sc_trans-ita.yml \
+  --legend pristine \
+  --system Zr2SC \
+  --label-fontsize 11 \
+  --out sigma_kappa_lorenz_vs_T.png
+```
+
+示例（多文件对比 + 调整右侧两根 y 轴间距）：
+
+```bash
+python perturbo_plot/plot_sigma_kappa_lorenz_vs_temperature.py \
+  pristine/zr2sc_trans-ita.yml defect/zr2sc_trans-ita.yml \
+  --legend pristine defect \
+  --component xx \
+  --right-axis-spacing 0.08 \
+  --xlim 200,800 \
+  --out sigma_kappa_lorenz_compare.png
+```
+
+---
+
+## 8) `perturbo_plot/perturbo_meanfp_io.py`
 
 这是 meanfp 系列脚本共用的 I/O 与绘图工具模块（读取 YAML、分箱统计、统一粗体/科学计数法样式等），一般不需要直接运行。
 

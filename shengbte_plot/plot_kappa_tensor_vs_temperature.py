@@ -174,7 +174,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     p.add_argument("--xlabel", default="Temperature (K)", help="x-axis label")
-    p.add_argument("--ylabel", default=r"$\kappa_{\mathrm{latt}}$ (W/mK)", help="y-axis label")
+    p.add_argument("--ylabel", default=r"Lattice Thermal conductivity $\kappa_{\mathrm{latt}}$ (W/mK)", help="y-axis label")
+
+    p.add_argument(
+        "--label-fontsize",
+        type=float,
+        default=None,
+        help=(
+            "Font size for axis labels AND tick numbers. "
+            "If omitted, uses matplotlib defaults."
+        ),
+    )
 
     p.add_argument(
         "--style",
@@ -318,6 +328,8 @@ def main() -> None:
 
     if args.lw <= 0:
         raise SystemExit("--lw must be > 0")
+    if args.label_fontsize is not None and float(args.label_fontsize) <= 0:
+        raise SystemExit("--label-fontsize must be > 0")
 
     if args.style == "prb":
         _apply_scienceplots_prb_style()
@@ -386,6 +398,17 @@ def main() -> None:
 
     ax.set_xlabel(str(args.xlabel))
     ax.set_ylabel(str(args.ylabel))
+
+    if args.label_fontsize is not None:
+        fs = float(args.label_fontsize)
+        ax.xaxis.label.set_size(fs)
+        ax.yaxis.label.set_size(fs)
+        ax.tick_params(axis="both", which="both", labelsize=fs)
+        try:
+            ax.xaxis.get_offset_text().set_size(fs)
+            ax.yaxis.get_offset_text().set_size(fs)
+        except Exception:
+            pass
 
     if args.ylog:
         ax.set_yscale("log")

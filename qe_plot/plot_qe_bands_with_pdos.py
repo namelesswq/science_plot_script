@@ -131,6 +131,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    p.add_argument(
+        "--pdos-components",
+        default=None,
+        help=(
+            "Optional m-component selection for specific orbitals. "
+            "QE projwfc pdos_atm files are assumed to have columns: E, ldos, then 2l+1 components. "
+            "Format: 'p=all;d=1,3,5' (semicolon-separated). Indices are 1..(2l+1) in file order after ldos. "
+            "If an orbital is listed here, its selected component series are plotted instead of the single column chosen by --pdos-col."
+        ),
+    )
+
     # Shared / plot
     p.add_argument(
         "--fermi",
@@ -391,6 +402,137 @@ def _parse_n0_map(s: Optional[str]) -> Dict[str, int]:
         except ValueError as e:
             raise SystemExit(f"Invalid --n0 value for element {el!r}: {val!r} (must be integer)") from e
     return out
+
+
+def _orbital_component_count(orb: str) -> Optional[int]:
+    o = str(orb).strip().lower()
+    # Treat s as having no meaningful m-components.
+    # QE may write one column after ldos for s, but plotting it duplicates the total.
+    if o == "s":
+        return None
+    if o == "p":
+        return 3
+    if o == "d":
+        return 5
+    if o == "f":
+        return 7
+    return None
+
+
+def _orbital_component_label(orb: str, comp_idx: int) -> str:
+    """Return a human-friendly label for an orbital m-component.
+
+    QE projwfc pdos_atm files are assumed to store components in the order they
+    appear in the file (1-based). For d, use conventional real-orbital names.
+    """
+
+    o = str(orb).strip().lower()
+    k = int(comp_idx)
+
+    if o == "p":
+        names = [r"$p_{x}$", r"$p_{y}$", r"$p_{z}$"]
+        if 1 <= k <= len(names):
+            return names[k - 1]
+
+    if o == "d":
+        # User-preferred ordering (1..5): xz, yz, xy, x^2-y^2, z^2
+        names = [
+            r"$d_{xz}$",
+            r"$d_{yz}$",
+            r"$d_{xy}$",
+            r"$d_{x^2-y^2}$",
+            r"$d_{z^2}$",
+        ]
+        if 1 <= k <= len(names):
+            return names[k - 1]
+
+    # Fallback: keep the original numeric component notation.
+    return f"{o}[{k}]"
+
+
+def _parse_pdos_components(spec: Optional[str]) -> Tuple[bool, Dict[str, Optional[List[int]]]]:
+    """Parse --pdos-components.
+
+    Returns:
+      - all_orbitals: if True, apply to any orbital with known l (s/p/d/f)
+      - map: orb -> None (meaning all components) or explicit 1-based indices
+
+    Syntax:
+      - 'all' -> all orbitals, all components
+      - 'p=all;d=1,3,5' (semicolon-separated assignments)
+    """
+
+    if spec is None:
+        return False, {}
+
+    s = str(spec).strip()
+    if not s:
+        return False, {}
+
+    if s.lower() == "all":
+        return True, {}
+
+    out: Dict[str, Optional[List[int]]] = {}
+    parts = [p.strip() for p in s.split(";") if p.strip()]
+    if not parts:
+        return False, {}
+
+    for part in parts:
+        if "=" not in part:
+            raise SystemExit(
+                f"Invalid --pdos-components entry {part!r}. Expected like 'p=all' or 'd=1,3,5' (semicolon-separated)."
+            )
+        orb_raw, rhs = part.split("=", 1)
+        orb = orb_raw.strip().lower()
+        if not orb:
+            raise SystemExit(f"Invalid --pdos-components entry {part!r}: missing orbital")
+        if orb == "s":
+            raise SystemExit("--pdos-components does not support orbital 's' (s has no meaningful components).")
+        if _orbital_component_count(orb) is None:
+            raise SystemExit(f"Invalid --pdos-components orbital {orb!r}: expected one of p,d,f")
+
+        rhs2 = rhs.strip().lower()
+        if rhs2 in {"all", "*"}:
+            out[orb] = None
+            continue
+        if not rhs2:
+            raise SystemExit(f"Invalid --pdos-components entry {part!r}: missing component list")
+
+        idxs: List[int] = []
+        for tok in [t.strip() for t in rhs.split(",") if t.strip()]:
+            if "-" in tok:
+                a, b = tok.split("-", 1)
+                try:
+                    ia = int(a)
+                    ib = int(b)
+                except ValueError as e:
+                    raise SystemExit(f"Invalid component range token {tok!r} in --pdos-components") from e
+                if ia <= 0 or ib <= 0:
+                    raise SystemExit(f"Component indices must be positive in --pdos-components (got {tok!r})")
+                lo, hi = (ia, ib) if ia <= ib else (ib, ia)
+                idxs.extend(list(range(lo, hi + 1)))
+            else:
+                try:
+                    idxs.append(int(tok))
+                except ValueError as e:
+                    raise SystemExit(f"Invalid component index token {tok!r} in --pdos-components") from e
+
+        if not idxs:
+            raise SystemExit(f"Invalid --pdos-components entry {part!r}: empty component list")
+
+        # De-duplicate while preserving order
+        seen: set[int] = set()
+        idxs2: List[int] = []
+        for x in idxs:
+            if x <= 0:
+                raise SystemExit(f"Component indices must be >= 1 in --pdos-components (got {x})")
+            if x in seen:
+                continue
+            seen.add(x)
+            idxs2.append(x)
+        out[orb] = idxs2
+
+    return False, out
 
 
 def _flatten_tokens(tokens: Optional[Sequence[str]]) -> List[str]:
@@ -755,6 +897,13 @@ def _load_two_cols(path: str, xcol: int, ycol: int) -> Tuple[np.ndarray, np.ndar
     return x, y
 
 
+def _load_table(path: str) -> np.ndarray:
+    data = np.loadtxt(path, comments="#")
+    if data.ndim != 2 or data.shape[1] < 2:
+        raise RuntimeError(f"Unexpected table in {path}: shape={data.shape}")
+    return np.asarray(data, dtype=float)
+
+
 def _parse_element_wfc_orbital_from_name(path: str) -> Tuple[str, int, str]:
     base = os.path.basename(path)
     m1 = _RE_EL.search(base)
@@ -796,11 +945,16 @@ def _load_pdos_groups(
     orbitals_filter: Optional[set[str]],
     merge_wfc: bool,
     pdos_col: int,
+    pdos_components_all: bool,
+    pdos_components_map: Dict[str, Optional[List[int]]],
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray], List[str]]:
     """Return energy grid, series dict (label->dos), and label list in plotting order."""
 
-    groups_wfc: Dict[Tuple[str, int, str], np.ndarray] = {}
-    groups_merged: Dict[Tuple[str, str], np.ndarray] = {}
+    # Key layout:
+    #   - non-merged: (el, wfc_idx, orb, comp_idx) where comp_idx==0 means "single-column mode"
+    #   - merged:     (el, orb, comp_idx) where comp_idx==0 means "single-column mode"
+    groups_wfc: Dict[Tuple[str, int, str, int], np.ndarray] = {}
+    groups_merged: Dict[Tuple[str, str, int], np.ndarray] = {}
     energy_ref: Optional[np.ndarray] = None
 
     for f in pdos_files:
@@ -810,7 +964,22 @@ def _load_pdos_groups(
         if orbitals_filter is not None and orb not in orbitals_filter:
             continue
 
-        e, y = _load_two_cols(f, xcol=0, ycol=pdos_col)
+        tab = _load_table(f)
+        if tab.shape[1] <= 1:
+            raise SystemExit(f"Unexpected PDOS table in {f}: expected at least 2 columns")
+        e = np.asarray(tab[:, 0], dtype=float)
+
+        # Determine whether to expand into m components for this orbital.
+        orb_norm = str(orb).strip().lower()
+        comp_count = _orbital_component_count(orb_norm)
+        use_components = False
+        comp_sel: Optional[List[int]] = None
+        if pdos_components_all and comp_count is not None:
+            use_components = True
+            comp_sel = None
+        elif orb_norm in pdos_components_map:
+            use_components = True
+            comp_sel = pdos_components_map.get(orb_norm)
 
         if energy_ref is None:
             energy_ref = e
@@ -821,28 +990,93 @@ def _load_pdos_groups(
                     "Please regenerate PDOS with consistent energy grid."
                 )
 
-        if merge_wfc:
-            key2 = (el, orb)
-            if key2 not in groups_merged:
-                groups_merged[key2] = np.zeros_like(y, dtype=float)
-            groups_merged[key2] += y
+        if use_components:
+            if comp_count is None:
+                raise SystemExit(
+                    f"Requested m components for orbital {orb!r} from file {f!r}, but orbital is not one of s/p/d/f."
+                )
+
+            # Always include the orbital total when plotting m components.
+            # QE projwfc pdos_atm files are assumed to be: E, ldos, then 2l+1 component columns.
+            y_tot = np.asarray(tab[:, 1], dtype=float)
+            if merge_wfc:
+                key2 = (el, orb, 0)
+                if key2 not in groups_merged:
+                    groups_merged[key2] = np.zeros_like(y_tot, dtype=float)
+                groups_merged[key2] += y_tot
+            else:
+                key3 = (el, int(wfc_idx), orb, 0)
+                if key3 not in groups_wfc:
+                    groups_wfc[key3] = np.zeros_like(y_tot, dtype=float)
+                groups_wfc[key3] += y_tot
+
+            # QE projwfc pdos_atm files are expected to be: E, ldos, then 2l+1 component columns.
+            n_comp_in_file = int(tab.shape[1] - 2)
+            if n_comp_in_file <= 0:
+                raise SystemExit(
+                    f"Requested m components for orbital {orb!r} from file {f!r}, but file has no component columns (shape={tab.shape})."
+                )
+
+            # Be permissive: if QE wrote fewer columns than expected, just cap to what's present.
+            n_avail = n_comp_in_file
+            if comp_sel is None:
+                idxs = list(range(1, n_avail + 1))
+            else:
+                idxs = list(comp_sel)
+            for k in idxs:
+                if k < 1 or k > n_avail:
+                    raise SystemExit(
+                        f"--pdos-components selects component {k} for orbital {orb_norm!r}, but only {n_avail} components are available in {f!r}."
+                    )
+                yk = np.asarray(tab[:, 1 + k], dtype=float)
+                if merge_wfc:
+                    key2 = (el, orb, int(k))
+                    if key2 not in groups_merged:
+                        groups_merged[key2] = np.zeros_like(yk, dtype=float)
+                    groups_merged[key2] += yk
+                else:
+                    key3 = (el, int(wfc_idx), orb, int(k))
+                    if key3 not in groups_wfc:
+                        groups_wfc[key3] = np.zeros_like(yk, dtype=float)
+                    groups_wfc[key3] += yk
         else:
-            key3 = (el, wfc_idx, orb)
-            if key3 not in groups_wfc:
-                groups_wfc[key3] = np.zeros_like(y, dtype=float)
-            groups_wfc[key3] += y
+            if tab.shape[1] <= int(pdos_col):
+                raise SystemExit(
+                    f"Unexpected PDOS table in {f}: needs column {pdos_col} but has only {tab.shape[1]} columns"
+                )
+            y = np.asarray(tab[:, int(pdos_col)], dtype=float)
+            if merge_wfc:
+                key2 = (el, orb, 0)
+                if key2 not in groups_merged:
+                    groups_merged[key2] = np.zeros_like(y, dtype=float)
+                groups_merged[key2] += y
+            else:
+                key3 = (el, int(wfc_idx), orb, 0)
+                if key3 not in groups_wfc:
+                    groups_wfc[key3] = np.zeros_like(y, dtype=float)
+                groups_wfc[key3] += y
 
     if merge_wfc:
         if not groups_merged:
             raise SystemExit("No PDOS series selected after applying filters.")
-        keys_sorted = sorted(groups_merged.keys(), key=lambda k: (k[0], k[1]))
-        labels = [f"{el}-{orb}" for (el, orb) in keys_sorted]
+        keys_sorted = sorted(groups_merged.keys(), key=lambda k: (k[0], k[1], int(k[2])))
+        labels: List[str] = []
+        for (el, orb, comp_idx) in keys_sorted:
+            if int(comp_idx) == 0:
+                labels.append(f"{el}-{orb}")
+            else:
+                labels.append(f"{el}-{_orbital_component_label(str(orb), int(comp_idx))}")
         series = {lab: groups_merged[key] for lab, key in zip(labels, keys_sorted)}
     else:
         if not groups_wfc:
             raise SystemExit("No PDOS series selected after applying filters.")
-        keys_sorted = sorted(groups_wfc.keys(), key=lambda k: (k[0], k[2], k[1]))
-        labels = [f"{el}-{wfc}{orb}" for (el, wfc, orb) in keys_sorted]
+        keys_sorted = sorted(groups_wfc.keys(), key=lambda k: (k[0], k[2], int(k[1]), int(k[3])))
+        labels = []
+        for (el, wfc, orb, comp_idx) in keys_sorted:
+            if int(comp_idx) == 0:
+                labels.append(f"{el}-{int(wfc)}{orb}")
+            else:
+                labels.append(f"{el}-{int(wfc)}{_orbital_component_label(str(orb), int(comp_idx))}")
         series = {lab: groups_wfc[key] for lab, key in zip(labels, keys_sorted)}
 
     if energy_ref is None:
@@ -966,6 +1200,8 @@ def main() -> None:
     legend_bbox = _parse_xy(args.legend_bbox)
     system_bbox = _parse_xy(args.system_bbox)
     pdos_legend_bbox = _parse_xy(args.pdos_legend_bbox)
+
+    pdos_components_all, pdos_components_map = _parse_pdos_components(args.pdos_components)
 
     # Style
     if args.style == "prb":
@@ -1170,6 +1406,8 @@ def main() -> None:
                 orbitals_filter=orbitals_filter,
                 merge_wfc=args.merge_wfc,
                 pdos_col=args.pdos_col,
+                pdos_components_all=pdos_components_all,
+                pdos_components_map=pdos_components_map,
             )
         else:
             e_pdos_i = np.asarray(e_tot_i, dtype=float)
@@ -1178,20 +1416,22 @@ def main() -> None:
 
         # Optional relabeling with n0 (only when not merging wfc)
         if (not args.merge_wfc) and n0_map:
-            keys: List[Tuple[str, int, str]] = []
+            keys2: List[Tuple[str, int, str]] = []
             for lab in labels_i:
-                m = re.match(r"^([A-Za-z]+)-(\d+)([A-Za-z]+)$", lab)
+                m = re.match(r"^([A-Za-z]+)-(\d+)([A-Za-z]+)(?:\[(\d+)\])?$", lab)
                 if not m:
                     continue
-                keys.append((m.group(1), int(m.group(2)), m.group(3)))
-            label_map = _build_n_label_map(keys, n0_map)
-            new_series: Dict[str, np.ndarray] = {}
-            new_labels: List[str] = []
+                keys2.append((m.group(1), int(m.group(2)), m.group(3)))
+            label_map = _build_n_label_map(keys2, n0_map)
+            new_series = {}
+            new_labels = []
             for lab in labels_i:
-                m = re.match(r"^([A-Za-z]+)-(\d+)([A-Za-z]+)$", lab)
+                m = re.match(r"^([A-Za-z]+)-(\d+)([A-Za-z]+)(?:\[(\d+)\])?$", lab)
                 if m:
-                    key = (m.group(1), int(m.group(2)), m.group(3))
-                    new_lab = label_map.get(key, lab)
+                    base_key = (m.group(1), int(m.group(2)), m.group(3))
+                    suffix = m.group(4)
+                    base_lab = label_map.get(base_key, f"{m.group(1)}-{int(m.group(2))}{m.group(3)}")
+                    new_lab = f"{base_lab}[{suffix}]" if suffix is not None else base_lab
                 else:
                     new_lab = lab
                 new_series[new_lab] = series_i[lab]
@@ -1369,16 +1609,39 @@ def main() -> None:
                 t.set_fontweight("bold")
 
     # --- Plot rotated DOS/PDOS (x = DOS, y = Energy) ---
-    # Colors: total DOS = tab:black; PDOS cycles red/green/blue for easy distinction.
-    # When overlaying multiple datasets, use different linestyles per dataset.
-    # Note: Matplotlib's 'tab:' palette does not include 'tab:black'. Use 'black'.
-    total_dos_color = "black"
-    pdos_colors = ["tab:red", "tab:green", "tab:blue"]
+    # Colors: total DOS should match the corresponding dataset's band color/linestyle.
+    # For PDOS, use a fixed, non-cycling palette (so curves remain distinguishable).
+    # Keep the first few user-provided colors unchanged; then extend with other
+    # high-contrast colors (orange/purple/brown, ...).
+    pdos_colors = [
+        "tab:red",
+        "tab:green",
+        "tab:blue",
+        "tab:orange",
+        "tab:purple",
+        "tab:brown",
+        "tab:pink",
+        "tab:cyan",
+        "tab:olive",
+        "tab:gray",
+    ]
+
+    # Extended palette without cycling (used only when pdos_colors is exhausted).
+    _extra_pdos_colors: List[object] = []
+    for _cmap_name in ("tab20", "tab20b", "tab20c"):
+        _cmap = plt.get_cmap(_cmap_name)
+        if hasattr(_cmap, "colors"):
+            _extra_pdos_colors.extend(list(getattr(_cmap, "colors")))
+        else:
+            # Fallback: sample uniformly.
+            _extra_pdos_colors.extend([_cmap(k / 19.0) for k in range(20)])
     dataset_linestyles = ["-", "--", ":", "-."]
 
     for i in range(n_dataset):
         alpha_i = 1.0 if i == 0 else 0.9
-        ls_i = dataset_linestyles[i % len(dataset_linestyles)] if n_dataset > 1 else "-"
+        # Total DOS: match band style. PDOS: use per-dataset linestyle when comparing datasets.
+        band_color_i = dataset_colors[i % len(dataset_colors)]
+        ls_pdos_i = dataset_linestyles[i % len(dataset_linestyles)] if n_dataset > 1 else "-"
         # Always prefix DOS/PDOS legend entries by dataset legend.
         ds_prefix = str(legends[i]).strip()
         if not ds_prefix:
@@ -1389,19 +1652,29 @@ def main() -> None:
             ax_dos.plot(
                 dos_tot[i],
                 dos_e_tot[i],
-                color=total_dos_color,
-                lw=lw_tot,
+                color=band_color_i,
+                lw=lw_band,
                 alpha=alpha_i,
-                linestyle=ls_i,
+                linestyle="-",
                 label=lab_tot,
             )
 
         # PDOS
         for j, lab in enumerate(pdos_labels[i]):
             y = pdos_series[i][lab]
-            c = pdos_colors[j % len(pdos_colors)]
+            if j < len(pdos_colors):
+                c = pdos_colors[j]
+            else:
+                # Avoid cycling colors; consume an extended palette once.
+                jj = j - len(pdos_colors)
+                if jj >= len(_extra_pdos_colors):
+                    raise SystemExit(
+                        "Too many PDOS curves to assign distinct colors. "
+                        "Reduce --elements/--orbitals/--pdos-components selection, or merge WFCS."
+                    )
+                c = _extra_pdos_colors[jj]
             lab2 = f"{ds_prefix}:{lab}" if ds_prefix else str(lab)
-            ax_dos.plot(y, pdos_e[i], lw=lw_pdos, color=c, alpha=alpha_i, linestyle=ls_i, label=lab2)
+            ax_dos.plot(y, pdos_e[i], lw=lw_pdos, color=c, alpha=alpha_i, linestyle=ls_pdos_i, label=lab2)
 
     # Shared y decorations
     if args.fermi_line:
@@ -1470,9 +1743,17 @@ def main() -> None:
     leg_loc = str(args.pdos_legend_loc)
     leg_fs = args.pdos_legend_fontsize
 
+    # When the user anchors the legend with bbox_to_anchor (or requests the "above" placement),
+    # keeping loc='best' tends to be unintuitive/unpredictable.
+    # Use a deterministic default loc in these cases unless the user specified something else.
+    pdos_loc = leg_loc
+    if (pdos_legend_bbox is not None or args.pdos_legend_above) and pdos_loc.strip().lower() == "best":
+        pdos_loc = "lower center" if args.pdos_legend_above else "upper left"
+        print(f"[warn] --pdos-legend-loc='best' is ambiguous with --pdos-legend-bbox/--pdos-legend-above; using loc={pdos_loc!r}")
+
     use_pdos_frame = bool(args.pdos_legend_frame) or bool(args.pdos_legend_above)
     pdos_kwargs = dict(
-        loc=leg_loc,
+        loc=pdos_loc,
         frameon=use_pdos_frame,
     )
     if leg_fs is not None:
@@ -1486,7 +1767,6 @@ def main() -> None:
         anchor = pdos_legend_bbox if pdos_legend_bbox is not None else (0.5, 1.02)
         leg = ax_dos.legend(
             **pdos_kwargs,
-            loc="lower center",
             bbox_to_anchor=anchor,
             bbox_transform=ax_dos.transAxes,
             ncol=ncol_p,

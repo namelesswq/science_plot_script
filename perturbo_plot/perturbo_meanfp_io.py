@@ -133,15 +133,36 @@ def apply_plot_style(
     *,
     legend=None,
     bold: bool = True,
+    label_fontsize: Optional[float] = None,
     sci_y: str = "auto",
     ylog: bool = False,
 ) -> None:
     """Apply consistent plot styling.
 
     - bold: make labels/ticks/title/legend bold.
+    - label_fontsize: set axis label + tick label font size.
     - sci_y: 'auto'|'on'|'off' to show a ×10^n factor on y-axis.
       (Ignored when ylog=True.)
     """
+
+    if label_fontsize is not None:
+        fs = float(label_fontsize)
+        if fs <= 0:
+            raise ValueError("label_fontsize must be > 0")
+        try:
+            ax.xaxis.label.set_size(fs)
+            ax.yaxis.label.set_size(fs)
+        except Exception:
+            pass
+        try:
+            ax.tick_params(axis="both", which="both", labelsize=fs)
+        except Exception:
+            pass
+        try:
+            ax.xaxis.get_offset_text().set_size(fs)
+            ax.yaxis.get_offset_text().set_size(fs)
+        except Exception:
+            pass
 
     if bold:
         try:

@@ -130,6 +130,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help='Figure size "width,height" in inches (e.g. "7.2,4.6"). If omitted, uses the default size.',
     )
+    p.add_argument(
+        "--label-fontsize",
+        type=float,
+        default=None,
+        help="Font size for axis labels AND tick numbers. If omitted, uses matplotlib defaults.",
+    )
     p.add_argument("--title", default=None, help="Plot title")
     p.add_argument("--out", default=None, help="Output image path (png/pdf/svg). If omitted, show interactively.")
     return p
@@ -144,6 +150,9 @@ def _parse_lim(s: Optional[str]):
 
 def main() -> None:
     args = _build_parser().parse_args()
+
+    if args.label_fontsize is not None and float(args.label_fontsize) <= 0:
+        raise SystemExit("--label-fontsize must be > 0")
 
     if args.style == "prb":
         apply_scienceplots_prb_style()
@@ -202,7 +211,7 @@ def main() -> None:
             ax.plot(cx, cy, lw=2.0, label=label)
 
     ax.set_xlabel(r"$E-E_{\mathrm{f}}$ (eV)" if args.x == "e_minus_mu" else r"$E$ (eV)")
-    ax.set_ylabel(r"$|v|$ (m/s)")
+    ax.set_ylabel(r"Electron Group Velocity $|v|$ (m/s)")
 
     if args.ylog:
         ax.set_yscale("log")
@@ -258,7 +267,14 @@ def main() -> None:
             for t in leg_sys.get_texts():
                 t.set_fontweight("bold")
 
-    apply_plot_style(ax, legend=leg, bold=(not args.no_bold) and (args.style != "prb"), sci_y=args.sci_y, ylog=args.ylog)
+    apply_plot_style(
+        ax,
+        legend=leg,
+        bold=(not args.no_bold) and (args.style != "prb"),
+        label_fontsize=args.label_fontsize,
+        sci_y=args.sci_y,
+        ylog=args.ylog,
+    )
     fig.tight_layout()
 
     if args.out:
