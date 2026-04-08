@@ -11,6 +11,9 @@ from perturbo_meanfp_io import (
     apply_plot_style,
     apply_scienceplots_prb_style,
     apply_default_bold_rcparams,
+    apply_global_fontsize,
+    apply_tick_steps,
+    apply_legend_frame,
     broadcast_list,
     bin_statistics,
     default_label,
@@ -75,6 +78,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional legend anchor (bbox_to_anchor) in axes coordinates 'x,y'.",
     )
+    p.add_argument(
+        "--legend-alpha",
+        type=float,
+        default=None,
+        help="Optional alpha (0..1) for the dataset legend background frame.",
+    )
 
     p.add_argument("--system", default=None, help="Overall system/material label shown as a separate legend entry (pure text).")
     p.add_argument(
@@ -99,6 +108,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional system anchor (bbox_to_anchor) in axes coordinates 'x,y'.",
     )
+    p.add_argument(
+        "--system-alpha",
+        type=float,
+        default=None,
+        help="Optional alpha (0..1) for the system label background frame.",
+    )
 
     p.add_argument("--config", type=int, default=1, help="Configuration index [default: 1]")
     p.add_argument(
@@ -115,6 +130,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--s", type=float, default=4.0, help="Marker size for scatter mode [default: 4]")
     p.add_argument("--ylog", action="store_true", help="Use log scale on y-axis")
     p.add_argument("--no-bold", action="store_true", help="Disable bold text in the figure")
+    p.add_argument("--bold-fonts", action="store_true", help="Force bold text across the whole figure")
+    p.add_argument(
+        "--fontsize",
+        type=float,
+        default=None,
+        help="Global/default font size (rcParams). Does not override explicit per-item sizes.",
+    )
     p.add_argument(
         "--sci-y",
         choices=["auto", "on", "off"],
@@ -123,6 +145,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--xlim", default=None, help='x limits "xmin,xmax" in eV')
     p.add_argument("--ylim", default=None, help='y limits "ymin,ymax"')
+    p.add_argument("--xtick-step", type=float, default=None, help="Major tick step on x-axis")
+    p.add_argument("--ytick-step", type=float, default=None, help="Major tick step on y-axis (ignored with --ylog)")
     p.add_argument(
         "--figsize",
         default=None,
@@ -154,8 +178,17 @@ def main() -> None:
 
     if args.style == "prb":
         apply_scienceplots_prb_style()
-    else:
-        if not args.no_bold:
+    apply_global_fontsize(args.fontsize)
+
+    want_bold = bool(args.bold_fonts) or ((args.style != "prb") and (not args.no_bold))
+    if want_bold:
+        try:
+            import matplotlib as mpl
+
+            mpl.rcParams.update({"font.weight": "bold", "axes.labelweight": "bold", "axes.titleweight": "bold"})
+        except Exception:
+            pass
+        if args.style != "prb":
             apply_default_bold_rcparams()
 
     legend_bbox = parse_xy(args.legend_bbox)
@@ -209,11 +242,16 @@ def main() -> None:
             cx, cy = bin_statistics(xs, ys, bin_width=args.bin_width, reducer=args.reducer)
             ax.plot(cx, cy, lw=2.0, label=label)
 
-    ax.set_xlabel(r"$E-E_{\mathrm{f}}$ (eV)" if args.x == "e_minus_mu" else r"$E$ (eV)")
+    if args.x == "e_minus_mu":
+        ax.set_xlabel(r"$\mathbf{E-E_{f}}\ (\mathbf{eV})$" if want_bold else r"$E-E_{\mathrm{f}}$ (eV)")
+    else:
+        ax.set_xlabel(r"$\mathbf{E}\ (\mathbf{eV})$" if want_bold else r"$E$ (eV)")
     ax.set_ylabel("Mean Free Path (nm)")
 
     if args.ylog:
         ax.set_yscale("log")
+
+    apply_tick_steps(ax, xtick_step=args.xtick_step, ytick_step=args.ytick_step, ylog=args.ylog)
 
     if xlim:
         ax.set_xlim(*xlim)
@@ -226,16 +264,31 @@ def main() -> None:
     if args.style != "prb":
         ax.grid(True, alpha=0.25)
 
+    legend_loc = str(args.legend_loc)
+    if legend_bbox is not None and legend_loc.strip().lower() == "best":
+        legend_loc = "upper left"
+
+    legend_frameon = args.legend_alpha is not None
     if legend_bbox is None:
-        leg = ax.legend(loc=str(args.legend_loc), frameon=False, fontsize=args.legend_fontsize)
+        leg = ax.legend(
+            loc=legend_loc,
+            frameon=legend_frameon,
+            fontsize=args.legend_fontsize,
+            handletextpad=0.4,
+            handlelength=1.2,
+        )
     else:
         leg = ax.legend(
-            loc=str(args.legend_loc),
+            loc=legend_loc,
             bbox_to_anchor=legend_bbox,
             bbox_transform=ax.transAxes,
-            frameon=False,
+            frameon=legend_frameon,
             fontsize=args.legend_fontsize,
+            handletextpad=0.4,
+            handlelength=1.2,
+            borderaxespad=0.0,
         )
+    apply_legend_frame(leg, alpha=args.legend_alpha)
 
     if args.system is not None and str(args.system).strip():
         ax.add_artist(leg)
@@ -248,18 +301,33 @@ def main() -> None:
             except Exception:
                 fs = None
 
+        system_loc = str(args.system_loc)
+        if system_bbox is not None and system_loc.strip().lower() == "best":
+            system_loc = "upper left"
+
+        system_frameon = args.system_alpha is not None
         if system_bbox is None:
-            leg_sys = ax.legend(handles=[handle], loc=str(args.system_loc), frameon=False, fontsize=fs, handlelength=0)
+            leg_sys = ax.legend(
+                handles=[handle],
+                loc=system_loc,
+                frameon=system_frameon,
+                fontsize=fs,
+                handlelength=0,
+                handletextpad=0.0,
+            )
         else:
             leg_sys = ax.legend(
                 handles=[handle],
-                loc=str(args.system_loc),
+                loc=system_loc,
                 bbox_to_anchor=system_bbox,
                 bbox_transform=ax.transAxes,
-                frameon=False,
+                frameon=system_frameon,
                 fontsize=fs,
                 handlelength=0,
+                handletextpad=0.0,
+                borderaxespad=0.0,
             )
+        apply_legend_frame(leg_sys, alpha=args.system_alpha)
         if leg_sys is not None:
             for t in leg_sys.get_texts():
                 t.set_fontweight("bold")
@@ -267,7 +335,7 @@ def main() -> None:
     apply_plot_style(
         ax,
         legend=leg,
-        bold=(not args.no_bold) and (args.style != "prb"),
+        bold=want_bold,
         label_fontsize=args.label_fontsize,
         sci_y=args.sci_y,
         ylog=args.ylog,

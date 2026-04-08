@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import colors as mcolors
 from matplotlib.lines import Line2D
+from matplotlib.ticker import MultipleLocator
+from matplotlib.text import Text
 
 
 _CM1_PER_THz = 33.35641  # THz = (cm^-1)/33.35641
@@ -163,6 +165,38 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     p.add_argument(
+        "--fontsize",
+        type=float,
+        default=None,
+        help=(
+            "Global default font size (rcParams). Does not override explicit per-item sizes like "
+            "--label-fontsize/--legend-fontsize/--system-fontsize/--dos-legend-fontsize."
+        ),
+    )
+
+    p.add_argument(
+        "--bold-fonts",
+        action="store_true",
+        help="Force all text in the figure to bold (including for --style prb).",
+    )
+
+    p.add_argument(
+        "--xtick-step",
+        type=float,
+        default=None,
+        help=(
+            "Major tick step for the DOS panel x-axis (states/unit). "
+            "Note: the bands panel x-axis uses fixed high-symmetry ticks."
+        ),
+    )
+    p.add_argument(
+        "--ytick-step",
+        type=float,
+        default=None,
+        help="Major tick step for the shared frequency y-axis (in the selected unit).",
+    )
+
+    p.add_argument(
         "--figsize",
         default=None,
         help='Figure size "width,height" in inches.',
@@ -202,6 +236,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--dos-legend-fontsize", type=float, default=None, help="DOS legend fontsize")
     p.add_argument(
+        "--dos-legend-alpha",
+        type=float,
+        default=None,
+        help="If set, draw the DOS legend with a white semi-transparent frame (0..1).",
+    )
+    p.add_argument(
         "--dos-legend-bbox",
         default=None,
         help="Optional DOS legend anchor (bbox_to_anchor) in axes coordinates 'x,y'.",
@@ -229,6 +269,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Font size for dataset legend text (left panel). If omitted, uses an automatic larger size.",
+    )
+    p.add_argument(
+        "--legend-alpha",
+        type=float,
+        default=None,
+        help="If set, draw the dataset legend with a white semi-transparent frame (0..1).",
     )
     p.add_argument(
         "--legend-loc",
@@ -273,6 +319,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--system-loc",
         default="upper right",
         help="Location for --system annotation (matplotlib legend loc). Default: upper right.",
+    )
+
+    p.add_argument(
+        "--system-alpha",
+        type=float,
+        default=None,
+        help="If set, draw the system annotation with a white semi-transparent frame (0..1).",
     )
 
     p.add_argument(
@@ -331,6 +384,48 @@ def _apply_scienceplots_prb_style() -> None:
             f"Original error: {e}"
         )
     plt.style.use(["science", "no-latex"])
+
+
+def _apply_global_fontsize(fontsize: Optional[float]) -> None:
+    if fontsize is None:
+        return
+    fs = float(fontsize)
+    if fs <= 0:
+        raise SystemExit("--fontsize must be > 0")
+    plt.rcParams.update(
+        {
+            "font.size": fs,
+            "axes.titlesize": fs,
+            "axes.labelsize": fs,
+            "xtick.labelsize": fs,
+            "ytick.labelsize": fs,
+            "legend.fontsize": fs,
+        }
+    )
+
+
+def _set_figure_text_weight(fig: plt.Figure, weight: str) -> None:
+    for t in fig.findobj(Text):
+        try:
+            t.set_fontweight(weight)
+        except Exception:
+            pass
+
+
+def _apply_legend_frame(leg, *, alpha: float) -> None:
+    if leg is None:
+        return
+    a = float(alpha)
+    if not (0.0 <= a <= 1.0):
+        raise SystemExit("legend alpha must be in [0, 1]")
+    leg.set_frame_on(True)
+    frame = leg.get_frame()
+    frame.set_facecolor("white")
+    frame.set_alpha(a)
+    try:
+        frame.set_edgecolor("0.6")
+    except Exception:
+        pass
 
 
 def _apply_bold(ax, *, bold: bool) -> None:
@@ -926,6 +1021,9 @@ def _convert_dos_unit_for_x(
 def main() -> None:
     args = _build_parser().parse_args()
 
+    if args.bold_fonts and args.no_bold:
+        raise SystemExit("Do not use --bold-fonts together with --no-bold")
+
     ylim = _parse_lim(args.ylim)
     dos_xlim = _parse_lim(args.dos_xlim)
     figsize = _parse_figsize(args.figsize)
@@ -941,6 +1039,16 @@ def main() -> None:
 
     if args.style == "prb":
         _apply_scienceplots_prb_style()
+
+    # Apply global defaults after selecting the base style.
+    _apply_global_fontsize(args.fontsize)
+
+    want_bold_fonts = bool(args.bold_fonts) or ((args.style == "default") and (not args.no_bold))
+    if want_bold_fonts:
+        plt.rcParams["font.weight"] = "bold"
+        plt.rcParams["axes.labelweight"] = "bold"
+        if args.style == "default":
+            plt.rcParams["axes.linewidth"] = 2
 
     # --- Multi-dataset setup ---
     freq_paths = list(args.freq)
@@ -1192,6 +1300,12 @@ def main() -> None:
     if ylim:
         ax_band.set_ylim(*ylim)
 
+    if args.ytick_step is not None:
+        step = float(args.ytick_step)
+        if step <= 0:
+            raise SystemExit("--ytick-step must be > 0")
+        ax_band.yaxis.set_major_locator(MultipleLocator(step))
+
     ylab = "Frequency (THz)" if args.unit == "THz" else "Frequency (cm^-1)"
     ax_band.set_ylabel(ylab)
 
@@ -1233,7 +1347,7 @@ def main() -> None:
                 leg_ds = ax_band.legend(
                     handles=handles_ds,
                     loc=str(args.legend_loc),
-                    frameon=False,
+                    frameon=bool(args.legend_alpha is not None),
                     fontsize=fs_ds,
                 )
             else:
@@ -1242,10 +1356,12 @@ def main() -> None:
                     loc=str(args.legend_loc),
                     bbox_to_anchor=legend_bbox,
                     bbox_transform=ax_band.transAxes,
-                    frameon=False,
+                    frameon=bool(args.legend_alpha is not None),
                     fontsize=fs_ds,
                 )
-            if leg_ds is not None:
+            if args.legend_alpha is not None:
+                _apply_legend_frame(leg_ds, alpha=float(args.legend_alpha))
+            if want_bold_fonts and leg_ds is not None:
                 for t in leg_ds.get_texts():
                     t.set_fontweight("bold")
 
@@ -1264,14 +1380,17 @@ def main() -> None:
             ax_band.add_artist(leg_ds)
 
         h = Line2D([0], [0], color="none", lw=0.0, label=sys_lab)
+        sys_kwargs = {
+            "frameon": bool(args.system_alpha is not None),
+            "fontsize": fs_sys,
+            "handlelength": 0,
+            "handletextpad": 0,
+        }
         if system_bbox is None:
             leg_sys = ax_band.legend(
                 handles=[h],
                 loc=str(args.system_loc),
-                frameon=False,
-                fontsize=fs_sys,
-                handlelength=0,
-                handletextpad=0,
+                **sys_kwargs,
             )
         else:
             leg_sys = ax_band.legend(
@@ -1279,14 +1398,22 @@ def main() -> None:
                 loc=str(args.system_loc),
                 bbox_to_anchor=system_bbox,
                 bbox_transform=ax_band.transAxes,
-                frameon=False,
-                fontsize=fs_sys,
-                handlelength=0,
-                handletextpad=0,
+                **sys_kwargs,
             )
+        if args.system_alpha is not None:
+            _apply_legend_frame(leg_sys, alpha=float(args.system_alpha))
         if leg_sys is not None:
             for t in leg_sys.get_texts():
-                t.set_fontweight("bold")
+                if want_bold_fonts:
+                    t.set_fontweight("bold")
+                try:
+                    t.set_ha("center")
+                except Exception:
+                    pass
+            try:
+                leg_sys._legend_box.align = "center"  # noqa: SLF001
+            except Exception:
+                pass
 
     # --- Plot rotated DOS/PDOS (x = DOS, y = Frequency) ---
     # Colors: total DOS = black; PDOS cycles red/green/blue.
@@ -1344,6 +1471,12 @@ def main() -> None:
                         continue
         ax_dos.set_xlim(0.0, xmax * 1.05 if xmax > 0 else 1.0)
 
+    if args.xtick_step is not None:
+        step = float(args.xtick_step)
+        if step <= 0:
+            raise SystemExit("--xtick-step must be > 0")
+        ax_dos.xaxis.set_major_locator(MultipleLocator(step))
+
     # Hide duplicate y tick labels on the right
     ax_dos.tick_params(axis="y", which="both", left=False, labelleft=False)
 
@@ -1377,17 +1510,31 @@ def main() -> None:
     handles_d, labels_d = ax_dos.get_legend_handles_labels()
     if handles_d and labels_d:
         dos_loc = str(args.dos_legend_loc)
+        if (dos_legend_bbox is not None) and (dos_loc.strip().lower() == "best"):
+            # When bbox_to_anchor is provided, loc='best' tends to ignore the anchor and
+            # auto-place the legend. Use a deterministic anchor-based loc instead.
+            dos_loc = "center left"
         dos_fs = args.dos_legend_fontsize
+        dos_frame = bool(args.dos_legend_alpha is not None)
         if dos_legend_bbox is None:
-            leg = ax_dos.legend(loc=dos_loc, frameon=False, fontsize=(float(dos_fs) if dos_fs is not None else None))
+            leg = ax_dos.legend(
+                loc=dos_loc,
+                frameon=dos_frame,
+                borderaxespad=0.0,
+                fontsize=(float(dos_fs) if dos_fs is not None else None),
+            )
         else:
             leg = ax_dos.legend(
                 loc=dos_loc,
                 bbox_to_anchor=dos_legend_bbox,
                 bbox_transform=ax_dos.transAxes,
-                frameon=False,
+                frameon=dos_frame,
+                borderaxespad=0.0,
                 fontsize=(float(dos_fs) if dos_fs is not None else None),
             )
+
+        if args.dos_legend_alpha is not None:
+            _apply_legend_frame(leg, alpha=float(args.dos_legend_alpha))
 
     if args.style == "default":
         ax_band.grid(True, alpha=0.25)
@@ -1396,10 +1543,13 @@ def main() -> None:
             _apply_bold(ax_band, bold=True)
             _apply_bold(ax_dos, bold=True)
 
-        # Make legend bold if requested
-        if (not args.no_bold) and leg is not None:
-            for t in leg.get_texts():
-                t.set_fontweight("bold")
+    # Make legend bold if requested
+    if want_bold_fonts and leg is not None:
+        for t in leg.get_texts():
+            t.set_fontweight("bold")
+
+    if want_bold_fonts:
+        _set_figure_text_weight(fig, "bold")
 
     fig.tight_layout()
     _fix_dense_xticklabels(fig, ax_band)

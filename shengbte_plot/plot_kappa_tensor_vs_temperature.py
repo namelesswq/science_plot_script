@@ -8,7 +8,93 @@ from typing import List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.ticker import MultipleLocator
 from matplotlib.lines import Line2D
+
+
+def _apply_global_fontsize(fontsize: Optional[float]) -> None:
+    """Apply global/default font sizes without overriding explicit per-item sizes."""
+
+    if fontsize is None:
+        return
+    fs = float(fontsize)
+    if fs <= 0:
+        raise SystemExit("--fontsize must be > 0")
+
+    plt.rcParams.update(
+        {
+            "font.size": fs,
+            "axes.labelsize": fs,
+            "xtick.labelsize": fs,
+            "ytick.labelsize": fs,
+            "legend.fontsize": fs,
+        }
+    )
+
+
+def _apply_legend_frame(leg, alpha: Optional[float]) -> None:
+    if leg is None:
+        return
+    if alpha is None:
+        return
+    a = float(alpha)
+    if not (0.0 <= a <= 1.0):
+        raise SystemExit("legend alpha must be in [0, 1]")
+
+    frame = leg.get_frame()
+    frame.set_facecolor("white")
+    frame.set_edgecolor("black")
+    frame.set_alpha(a)
+
+
+def _set_figure_text_weight(fig, weight: str) -> None:
+    """Best-effort bolding for all text artists (incl. legends)."""
+
+    if fig is None:
+        return
+    for ax in fig.get_axes():
+        try:
+            ax.title.set_fontweight(weight)
+        except Exception:
+            pass
+        try:
+            ax.xaxis.label.set_fontweight(weight)
+            ax.yaxis.label.set_fontweight(weight)
+        except Exception:
+            pass
+        try:
+            ax.xaxis.get_offset_text().set_fontweight(weight)
+            ax.yaxis.get_offset_text().set_fontweight(weight)
+        except Exception:
+            pass
+
+        for t in ax.get_xticklabels(which="both"):
+            t.set_fontweight(weight)
+        for t in ax.get_yticklabels(which="both"):
+            t.set_fontweight(weight)
+
+        leg = ax.get_legend()
+        if leg is not None:
+            for t in leg.get_texts():
+                t.set_fontweight(weight)
+
+
+def _boldify_kappa_latt_mathtext(label: str) -> str:
+    """Make $\kappa_{latt}$ truly bold under mathtext.
+
+    Matplotlib mathtext often ignores normal fontweight='bold' for Greek letters,
+    so we rewrite them with \boldsymbol and use \mathbf for the subscript.
+    """
+
+    if not label:
+        return label
+    s = str(label)
+    if "$" not in s:
+        return s
+
+    s = s.replace("\\kappa", "\\boldsymbol{\\kappa}")
+    s = s.replace("\\mathrm{latt}", "\\mathbf{latt}")
+    return s
 
 
 def _apply_scienceplots_prb_style() -> None:
@@ -63,6 +149,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Font size for legend text. If omitted, uses matplotlib default.",
     )
     p.add_argument(
+        "--legend-alpha",
+        type=float,
+        default=0.65,
+        help="Legend frame alpha in [0,1]. Default: 0.65.",
+    )
+    p.add_argument(
         "--legend-loc",
         default="best",
         help="Legend location (matplotlib legend loc). Default: best.",
@@ -93,6 +185,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Font size for --system legend text. If omitted, uses an automatic larger size.",
+    )
+    p.add_argument(
+        "--system-alpha",
+        type=float,
+        default=0.65,
+        help="System label frame alpha in [0,1]. Default: 0.65.",
     )
     p.add_argument(
         "--system-loc",
@@ -184,6 +282,33 @@ def _build_parser() -> argparse.ArgumentParser:
             "Font size for axis labels AND tick numbers. "
             "If omitted, uses matplotlib defaults."
         ),
+    )
+
+    p.add_argument(
+        "--fontsize",
+        type=float,
+        default=None,
+        help=(
+            "Global/default font size (rcParams). Does not override explicit per-item sizes "
+            "like --label-fontsize/--legend-fontsize/--system-fontsize."
+        ),
+    )
+    p.add_argument(
+        "--bold-fonts",
+        action="store_true",
+        help="Force bold text across the whole figure (best-effort).",
+    )
+    p.add_argument(
+        "--xtick-step",
+        type=float,
+        default=None,
+        help="Major tick step on x-axis (Temperature).",
+    )
+    p.add_argument(
+        "--ytick-step",
+        type=float,
+        default=None,
+        help="Major tick step on y-axis (kappa). Ignored when --ylog is set.",
     )
 
     p.add_argument(
@@ -334,6 +459,18 @@ def main() -> None:
     if args.style == "prb":
         _apply_scienceplots_prb_style()
 
+    _apply_global_fontsize(args.fontsize)
+
+    want_bold = bool(args.bold_fonts)
+    if want_bold:
+        plt.rcParams.update(
+            {
+                "font.weight": "bold",
+                "axes.labelweight": "bold",
+                "axes.titleweight": "bold",
+            }
+        )
+
     xlim = _parse_lim(args.xlim)
     ylim = _parse_lim(args.ylim)
     figsize = _parse_figsize(args.figsize)
@@ -397,7 +534,10 @@ def main() -> None:
         )
 
     ax.set_xlabel(str(args.xlabel))
-    ax.set_ylabel(str(args.ylabel))
+    ylab = str(args.ylabel)
+    if want_bold:
+        ylab = _boldify_kappa_latt_mathtext(ylab)
+    ax.set_ylabel(ylab)
 
     if args.label_fontsize is not None:
         fs = float(args.label_fontsize)
@@ -412,6 +552,18 @@ def main() -> None:
 
     if args.ylog:
         ax.set_yscale("log")
+
+    if args.xtick_step is not None:
+        step = float(args.xtick_step)
+        if step <= 0:
+            raise SystemExit("--xtick-step must be > 0")
+        ax.xaxis.set_major_locator(MultipleLocator(step))
+
+    if (not args.ylog) and (args.ytick_step is not None):
+        step = float(args.ytick_step)
+        if step <= 0:
+            raise SystemExit("--ytick-step must be > 0")
+        ax.yaxis.set_major_locator(MultipleLocator(step))
 
     if xlim:
         ax.set_xlim(*xlim)
@@ -441,11 +593,14 @@ def main() -> None:
 
     leg_main = None
     if handles_leg:
+        legend_loc = str(args.legend_loc)
+        if legend_bbox is not None and legend_loc == "best":
+            legend_loc = "upper left"
         kwargs = dict(
             handles=handles_leg,
-            loc=str(args.legend_loc),
-            frameon=False,
-            borderaxespad=0.2,
+            loc=legend_loc,
+            frameon=True,
+            borderaxespad=0.0 if legend_bbox is not None else 0.2,
             handlelength=1.8,
             handletextpad=0.6,
             labelspacing=0.35,
@@ -460,6 +615,7 @@ def main() -> None:
                 bbox_to_anchor=legend_bbox,
                 bbox_transform=ax.transAxes,
             )
+        _apply_legend_frame(leg_main, args.legend_alpha)
 
     # Global system annotation legend (pure text)
     if args.system is not None and str(args.system).strip():
@@ -476,11 +632,15 @@ def main() -> None:
         if leg_main is not None:
             ax.add_artist(leg_main)
 
+        system_loc = str(args.system_loc)
+        if system_bbox is not None and system_loc == "best":
+            system_loc = "upper left"
+
         if system_bbox is None:
             leg_sys = ax.legend(
                 handles=[h],
-                loc=str(args.system_loc),
-                frameon=False,
+                loc=system_loc,
+                frameon=True,
                 handlelength=0,
                 handletextpad=0.0,
                 borderaxespad=0.2,
@@ -489,18 +649,22 @@ def main() -> None:
         else:
             leg_sys = ax.legend(
                 handles=[h],
-                loc=str(args.system_loc),
+                loc=system_loc,
                 bbox_to_anchor=system_bbox,
                 bbox_transform=ax.transAxes,
-                frameon=False,
+                frameon=True,
                 handlelength=0,
                 handletextpad=0.0,
-                borderaxespad=0.2,
+                borderaxespad=0.0,
                 fontsize=fs,
             )
+        _apply_legend_frame(leg_sys, args.system_alpha)
         if leg_sys is not None:
             for t in leg_sys.get_texts():
                 t.set_fontweight("bold")
+
+    if want_bold:
+        _set_figure_text_weight(fig, "bold")
 
     fig.tight_layout()
     fig.savefig(str(args.out), dpi=300)

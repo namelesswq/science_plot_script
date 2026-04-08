@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
 from matplotlib.colors import to_rgb
+from matplotlib.text import Text
+from matplotlib.ticker import MultipleLocator
 
 
 @dataclass(frozen=True)
@@ -99,7 +101,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Comma-separated orbital filter, e.g. 's,p,d,f'. "
-            "Special tokens: 'no-tot' disables plotting total DOS; 'tot' forces plotting total DOS."
+            "Special tokens: 'no-tot' disables plotting total DOS; 'tot' forces plotting total DOS. "
+            "If provided but empty/blank, the script plots per-element summed PDOS (no orbital-resolved curves)."
         ),
     )
     p.add_argument(
@@ -168,6 +171,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ylim", default=None, help='Shared energy limits "ymin,ymax" in eV (after Fermi shift if used)')
 
     p.add_argument(
+        "--ytick-step",
+        type=float,
+        default=None,
+        help="Optional major tick spacing for the shared y-axis (eV). Example: --ytick-step 4",
+    )
+
+    p.add_argument(
+        "--xtick-step",
+        type=float,
+        default=None,
+        help=(
+            "Optional major tick spacing for the DOS-panel x-axis (states/eV). "
+            "Example: --xtick-step 2"
+        ),
+    )
+
+    p.add_argument(
         "--style",
         choices=["prb", "default"],
         default="prb",
@@ -217,6 +237,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     p.add_argument(
+        "--bold-fonts",
+        action="store_true",
+        help="Render all text (axis labels, ticks, legends, annotations) in bold.",
+    )
+
+    p.add_argument(
+        "--fontsize",
+        type=float,
+        default=None,
+        help=(
+            "Global default font size (axis labels, ticks, legends, annotations). "
+            "If provided, it does NOT override explicit font-size options like --label-fontsize/--system-fontsize/--pdos-legend-fontsize."
+        ),
+    )
+
+    p.add_argument(
         "--dos-xlim",
         default=None,
         help='PDOS panel x limits (DOS axis) "xmin,xmax". If omitted, auto from data.',
@@ -228,6 +264,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "Legend location inside the DOS panel. Passed to matplotlib legend(loc=...). "
             "Examples: 'best', 'upper right', 'upper left', 'lower right', 'lower left'."
         ),
+    )
+    p.add_argument(
+        "--no-pdos-legend",
+        action="store_true",
+        help="Disable the PDOS-panel legend entirely.",
     )
     p.add_argument("--pdos-legend-fontsize", type=float, default=None, help="Legend fontsize for PDOS panel")
 
@@ -282,6 +323,15 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Draw a white legend frame (useful when legend overlaps plotted curves).",
     )
+    p.add_argument(
+        "--legend-alpha",
+        type=float,
+        default=None,
+        help=(
+            "Optional alpha (0..1) for the dataset legend background box. "
+            "If provided, a white background frame is enabled even without --legend-frame."
+        ),
+    )
 
     # Global system annotation (pure text)
     p.add_argument(
@@ -327,6 +377,15 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Draw a white frame behind the --system label.",
     )
+    p.add_argument(
+        "--system-alpha",
+        type=float,
+        default=None,
+        help=(
+            "Optional alpha (0..1) for the system legend background box. "
+            "If provided, a white background frame is enabled even without --system-frame."
+        ),
+    )
 
     p.add_argument(
         "--pdos-legend-bbox",
@@ -345,6 +404,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--pdos-legend-frame",
         action="store_true",
         help="Draw a white frame behind the PDOS legend.",
+    )
+    p.add_argument(
+        "--pdos-legend-alpha",
+        type=float,
+        default=None,
+        help=(
+            "Optional alpha (0..1) for the PDOS legend background box. "
+            "If provided, a white background frame is enabled even without --pdos-legend-frame."
+        ),
     )
 
     return p
@@ -419,6 +487,35 @@ def _orbital_component_count(orb: str) -> Optional[int]:
     return None
 
 
+def _set_figure_text_weight(fig: plt.Figure, weight: str) -> None:
+    # Apply to all texts in the figure (ticks, labels, legends, annotations, offset texts, ...).
+    for t in fig.findobj(Text):
+        try:
+            t.set_fontweight(weight)
+        except Exception:
+            pass
+
+
+def _apply_global_fontsize(size: float) -> None:
+    if size <= 0:
+        raise SystemExit("--fontsize must be > 0")
+
+    # Treat as defaults: explicit per-item fontsize arguments still win.
+    # We set the common rcParams keys so styles like SciencePlots don't lock
+    # sizes to their own numeric defaults.
+    plt.rcParams.update(
+        {
+            "font.size": float(size),
+            "axes.labelsize": float(size),
+            "axes.titlesize": float(size),
+            "xtick.labelsize": float(size),
+            "ytick.labelsize": float(size),
+            "legend.fontsize": float(size),
+            "figure.titlesize": float(size),
+        }
+    )
+
+
 def _orbital_component_label(orb: str, comp_idx: int) -> str:
     """Return a human-friendly label for an orbital m-component.
 
@@ -448,6 +545,21 @@ def _orbital_component_label(orb: str, comp_idx: int) -> str:
 
     # Fallback: keep the original numeric component notation.
     return f"{o}[{k}]"
+
+
+def _boldify_orbital_component_mathtext_in_text(s: str) -> str:
+        """Bold orbital-component mathtext inside a larger label string.
+
+        Example:
+            'D1:Zr-$d_{xz}$' -> 'D1:Zr-$\\mathbf{d_{xz}}$'
+
+        Matplotlib mathtext often ignores normal fontweight='bold'.
+        """
+
+        if not s:
+                return s
+        txt = str(s)
+        return re.sub(r"\$(?P<body>[pdf]_\{[^$]*\})\$", r"$\\mathbf{\g<body>}$", txt)
 
 
 def _parse_pdos_components(spec: Optional[str]) -> Tuple[bool, Dict[str, Optional[List[int]]]]:
@@ -943,6 +1055,7 @@ def _load_pdos_groups(
     pdos_files: Sequence[str],
     elements_filter: Optional[set[str]],
     orbitals_filter: Optional[set[str]],
+    element_sum_mode: bool,
     merge_wfc: bool,
     pdos_col: int,
     pdos_components_all: bool,
@@ -953,6 +1066,7 @@ def _load_pdos_groups(
     # Key layout:
     #   - non-merged: (el, wfc_idx, orb, comp_idx) where comp_idx==0 means "single-column mode"
     #   - merged:     (el, orb, comp_idx) where comp_idx==0 means "single-column mode"
+    groups_el: Dict[str, np.ndarray] = {}
     groups_wfc: Dict[Tuple[str, int, str, int], np.ndarray] = {}
     groups_merged: Dict[Tuple[str, str, int], np.ndarray] = {}
     energy_ref: Optional[np.ndarray] = None
@@ -989,6 +1103,17 @@ def _load_pdos_groups(
                     f"Energy grid mismatch among PDOS files. Offending file: {f}. "
                     "Please regenerate PDOS with consistent energy grid."
                 )
+
+        if element_sum_mode:
+            if tab.shape[1] <= int(pdos_col):
+                raise SystemExit(
+                    f"Unexpected PDOS table in {f}: needs column {pdos_col} but has only {tab.shape[1]} columns"
+                )
+            y = np.asarray(tab[:, int(pdos_col)], dtype=float)
+            if el not in groups_el:
+                groups_el[el] = np.zeros_like(y, dtype=float)
+            groups_el[el] += y
+            continue
 
         if use_components:
             if comp_count is None:
@@ -1056,7 +1181,12 @@ def _load_pdos_groups(
                     groups_wfc[key3] = np.zeros_like(y, dtype=float)
                 groups_wfc[key3] += y
 
-    if merge_wfc:
+    if element_sum_mode:
+        if not groups_el:
+            raise SystemExit("No PDOS series selected after applying filters.")
+        labels = sorted(groups_el.keys(), key=lambda x: str(x))
+        series = {lab: groups_el[lab] for lab in labels}
+    elif merge_wfc:
         if not groups_merged:
             raise SystemExit("No PDOS series selected after applying filters.")
         keys_sorted = sorted(groups_merged.keys(), key=lambda k: (k[0], k[1], int(k[2])))
@@ -1206,6 +1336,8 @@ def main() -> None:
     # Style
     if args.style == "prb":
         _apply_scienceplots_prb_style()
+    if args.fontsize is not None:
+        _apply_global_fontsize(float(args.fontsize))
 
     bands_paths = _flatten_tokens(args.bands)
     band_in_paths = _flatten_tokens(args.band_in)
@@ -1268,7 +1400,12 @@ def main() -> None:
 
     orbitals_filter = None
     plot_total = True
-    if args.orbitals:
+    element_sum_mode = False
+    if args.orbitals is not None and str(args.orbitals).strip() == "":
+        element_sum_mode = True
+        orbitals_filter = None
+        plot_total = True
+    elif args.orbitals:
         raw = [x.strip() for x in args.orbitals.split(",") if x.strip()]
         norm = [x.lower().replace("_", "-") for x in raw]
         if any(t in {"no-tot", "no-total", "notot", "nototal"} for t in norm):
@@ -1404,6 +1541,7 @@ def main() -> None:
                 pdos_files=pdos_files_i,
                 elements_filter=elements_filter,
                 orbitals_filter=orbitals_filter,
+                element_sum_mode=element_sum_mode,
                 merge_wfc=args.merge_wfc,
                 pdos_col=args.pdos_col,
                 pdos_components_all=pdos_components_all,
@@ -1516,44 +1654,77 @@ def main() -> None:
         handles_leg.append(Line2D([], [], color=color_i, lw=lw_band, label=lab))
 
     leg_main = None
+    leg_main_on_axes = False
     if handles_leg:
         use_frame = bool(args.legend_frame) or bool(args.legend_above)
+        if args.legend_alpha is not None:
+            use_frame = True
+
+        legend_loc = str(args.legend_loc)
+        if legend_bbox is not None and legend_loc.strip().lower() == "best":
+            legend_loc = "upper left"
         kwargs = dict(
             handles=handles_leg,
-            loc=str(args.legend_loc),
+            loc=legend_loc,
             frameon=use_frame,
-            borderaxespad=0.2,
+            borderaxespad=0.0 if legend_bbox is not None else 0.2,
             handlelength=1.8,
             handletextpad=0.6,
             labelspacing=0.35,
         )
         if use_frame:
-            kwargs.update(dict(framealpha=1.0, facecolor="white", edgecolor="0.85"))
+            alpha = 1.0
+            if args.legend_alpha is not None:
+                alpha = float(args.legend_alpha)
+                if alpha < 0 or alpha > 1:
+                    raise SystemExit("--legend-alpha must be in [0, 1]")
+            kwargs.update(dict(framealpha=alpha, facecolor="white", edgecolor="0.85"))
 
         if args.legend_fontsize is not None:
             kwargs["fontsize"] = float(args.legend_fontsize)
+
+        # If the legend is anchored (bbox) or placed above, draw it on the figure layer
+        # so it cannot be covered by the DOS panel.
+        draw_on_figure = bool(args.legend_above) or (legend_bbox is not None)
 
         if args.legend_above:
             # Put legend above axes: use axes coords with y>1 and reserve top margin later.
             ncol = min(max(1, int(n_dataset)), 4)
             if n_dataset <= 4:
                 ncol = int(n_dataset)
-            leg_main = ax_band.legend(
-                **kwargs,
-                loc="lower center",
-                bbox_to_anchor=(0.5, 1.02),
-                bbox_transform=ax_band.transAxes,
-                ncol=ncol,
-            )
+            if draw_on_figure:
+                leg_main = fig.legend(
+                    **kwargs,
+                    loc="lower center",
+                    bbox_to_anchor=(0.5, 1.02),
+                    bbox_transform=ax_band.transAxes,
+                    ncol=ncol,
+                )
+            else:
+                leg_main = ax_band.legend(
+                    **kwargs,
+                    loc="lower center",
+                    bbox_to_anchor=(0.5, 1.02),
+                    bbox_transform=ax_band.transAxes,
+                    ncol=ncol,
+                )
+                leg_main_on_axes = True
         else:
             if legend_bbox is None:
                 leg_main = ax_band.legend(**kwargs)
+                leg_main_on_axes = True
             else:
-                leg_main = ax_band.legend(
+                leg_main = fig.legend(
                     **kwargs,
                     bbox_to_anchor=legend_bbox,
                     bbox_transform=ax_band.transAxes,
                 )
+
+        if leg_main is not None:
+            try:
+                leg_main.set_zorder(1000)
+            except Exception:
+                pass
 
     # Global system annotation legend (pure text)
     if args.system is not None and str(args.system).strip():
@@ -1567,20 +1738,28 @@ def main() -> None:
             except Exception:
                 fs = None
 
-        if leg_main is not None:
+        if leg_main is not None and leg_main_on_axes:
             ax_band.add_artist(leg_main)
 
-        use_sys_frame = bool(args.system_frame) or bool(args.system_above)
+        use_sys_frame = bool(args.system_frame) or bool(args.system_above) or (args.system_alpha is not None)
+        system_loc = str(args.system_loc)
+        if system_bbox is not None and system_loc.strip().lower() == "best":
+            system_loc = "upper left"
         sys_kwargs = dict(
             handles=[h],
             frameon=use_sys_frame,
             handlelength=0,
             handletextpad=0.0,
-            borderaxespad=0.2,
+            borderaxespad=0.0 if system_bbox is not None else 0.2,
             fontsize=fs,
         )
         if use_sys_frame:
-            sys_kwargs.update(dict(framealpha=1.0, facecolor="white", edgecolor="0.85"))
+            alpha = 1.0
+            if args.system_alpha is not None:
+                alpha = float(args.system_alpha)
+                if alpha < 0 or alpha > 1:
+                    raise SystemExit("--system-alpha must be in [0, 1]")
+            sys_kwargs.update(dict(framealpha=alpha, facecolor="white", edgecolor="0.85"))
 
         if args.system_above:
             # Put system label above axes. If user supplied --system-bbox, honor it.
@@ -1595,18 +1774,15 @@ def main() -> None:
             if system_bbox is None:
                 leg_sys = ax_band.legend(
                     **sys_kwargs,
-                    loc=str(args.system_loc),
+                    loc=system_loc,
                 )
             else:
                 leg_sys = ax_band.legend(
                     **sys_kwargs,
-                    loc=str(args.system_loc),
+                    loc=system_loc,
                     bbox_to_anchor=system_bbox,
                     bbox_transform=ax_band.transAxes,
                 )
-        if leg_sys is not None:
-            for t in leg_sys.get_texts():
-                t.set_fontweight("bold")
 
     # --- Plot rotated DOS/PDOS (x = DOS, y = Energy) ---
     # Colors: total DOS should match the corresponding dataset's band color/linestyle.
@@ -1674,6 +1850,8 @@ def main() -> None:
                     )
                 c = _extra_pdos_colors[jj]
             lab2 = f"{ds_prefix}:{lab}" if ds_prefix else str(lab)
+            if args.bold_fonts:
+                lab2 = _boldify_orbital_component_mathtext_in_text(lab2)
             ax_dos.plot(y, pdos_e[i], lw=lw_pdos, color=c, alpha=alpha_i, linestyle=ls_pdos_i, label=lab2)
 
     # Shared y decorations
@@ -1683,6 +1861,13 @@ def main() -> None:
 
     if ylim:
         ax_band.set_ylim(*ylim)
+
+    if args.ytick_step is not None:
+        step = float(args.ytick_step)
+        if step <= 0:
+            raise SystemExit("--ytick-step must be > 0")
+        # Apply to the shared y-axis (ax_dos shares y with ax_band).
+        ax_band.yaxis.set_major_locator(MultipleLocator(step))
 
     if ref_xk is not None:
         ax_band.set_xlim(float(ref_xk[0]), float(ref_xk[-1]))
@@ -1708,9 +1893,21 @@ def main() -> None:
 
         ax_dos.set_xlim(0.0, xmax * 1.05 if xmax > 0 else 1.0)
 
+    if args.xtick_step is not None:
+        step = float(args.xtick_step)
+        if step <= 0:
+            raise SystemExit("--xtick-step must be > 0")
+        ax_dos.xaxis.set_major_locator(MultipleLocator(step))
+
     # Labels: keep compact xlabel on PDOS panel and show x-axis tick values
     any_fermi = any(x is not None for x in fermi_list)
-    ax_band.set_ylabel(r"$E - E_{f}$ (eV)" if any_fermi else "Energy (eV)", labelpad=-2.0)
+    if any_fermi:
+        # NOTE: mathtext inside '$...$' does not reliably respect Text fontweight.
+        # When --bold-fonts is requested, explicitly bold the math expression.
+        ylabel = r"$\mathbf{E - E_{f}}\ (\mathbf{eV})$" if args.bold_fonts else r"$E - E_{f}$ (eV)"
+    else:
+        ylabel = "Energy (eV)"
+    ax_band.set_ylabel(ylabel, labelpad=-2.0)
     # Also reduce y-tick label padding to keep the left side compact.
     ax_band.tick_params(axis="y", which="both", pad=2.0)
 
@@ -1725,6 +1922,7 @@ def main() -> None:
         for a in (ax_band, ax_dos):
             a.xaxis.label.set_size(fs)
             a.yaxis.label.set_size(fs)
+            a.tick_params(axis="both", which="both", labelsize=fs)
 
         # The DOS-panel xlabel is a unit label; keep it slightly smaller.
         ax_dos.xaxis.label.set_size(fs * 0.85)
@@ -1740,46 +1938,59 @@ def main() -> None:
     ax_dos.tick_params(axis="y", which="both", left=False, labelleft=False)
 
     # Legend on DOS panel (keeps figure interpretable even without x-axis label)
-    leg_loc = str(args.pdos_legend_loc)
-    leg_fs = args.pdos_legend_fontsize
+    if not args.no_pdos_legend:
+        leg_loc = str(args.pdos_legend_loc)
+        leg_fs = args.pdos_legend_fontsize
 
-    # When the user anchors the legend with bbox_to_anchor (or requests the "above" placement),
-    # keeping loc='best' tends to be unintuitive/unpredictable.
-    # Use a deterministic default loc in these cases unless the user specified something else.
-    pdos_loc = leg_loc
-    if (pdos_legend_bbox is not None or args.pdos_legend_above) and pdos_loc.strip().lower() == "best":
-        pdos_loc = "lower center" if args.pdos_legend_above else "upper left"
-        print(f"[warn] --pdos-legend-loc='best' is ambiguous with --pdos-legend-bbox/--pdos-legend-above; using loc={pdos_loc!r}")
-
-    use_pdos_frame = bool(args.pdos_legend_frame) or bool(args.pdos_legend_above)
-    pdos_kwargs = dict(
-        loc=pdos_loc,
-        frameon=use_pdos_frame,
-    )
-    if leg_fs is not None:
-        pdos_kwargs["fontsize"] = float(leg_fs)
-    if use_pdos_frame:
-        pdos_kwargs.update(dict(framealpha=1.0, facecolor="white", edgecolor="0.85"))
-
-    if args.pdos_legend_above:
-        # Put PDOS legend above DOS axes; if user gave --pdos-legend-bbox, honor it.
-        ncol_p = min(max(1, int(len(ax_dos.get_lines()))), 4)
-        anchor = pdos_legend_bbox if pdos_legend_bbox is not None else (0.5, 1.02)
-        leg = ax_dos.legend(
-            **pdos_kwargs,
-            bbox_to_anchor=anchor,
-            bbox_transform=ax_dos.transAxes,
-            ncol=ncol_p,
-        )
-    else:
-        if pdos_legend_bbox is None:
-            leg = ax_dos.legend(**pdos_kwargs)
-        else:
-            leg = ax_dos.legend(
-                **pdos_kwargs,
-                bbox_to_anchor=pdos_legend_bbox,
-                bbox_transform=ax_dos.transAxes,
+        # When the user anchors the legend with bbox_to_anchor (or requests the "above" placement),
+        # keeping loc='best' tends to be unintuitive/unpredictable.
+        # Use a deterministic default loc in these cases unless the user specified something else.
+        pdos_loc = leg_loc
+        if (pdos_legend_bbox is not None or args.pdos_legend_above) and pdos_loc.strip().lower() == "best":
+            pdos_loc = "lower center" if args.pdos_legend_above else "upper left"
+            print(
+                f"[warn] --pdos-legend-loc='best' is ambiguous with --pdos-legend-bbox/--pdos-legend-above; using loc={pdos_loc!r}"
             )
+
+        use_pdos_frame = bool(args.pdos_legend_frame) or bool(args.pdos_legend_above)
+        if args.pdos_legend_alpha is not None:
+            use_pdos_frame = True
+        pdos_kwargs = dict(
+            loc=pdos_loc,
+            frameon=use_pdos_frame,
+        )
+        if leg_fs is not None:
+            pdos_kwargs["fontsize"] = float(leg_fs)
+        if use_pdos_frame:
+            alpha = 1.0
+            if args.pdos_legend_alpha is not None:
+                alpha = float(args.pdos_legend_alpha)
+                if alpha < 0 or alpha > 1:
+                    raise SystemExit("--pdos-legend-alpha must be in [0, 1]")
+            pdos_kwargs.update(dict(framealpha=alpha, facecolor="white", edgecolor="0.85"))
+
+        if args.pdos_legend_above:
+            # Put PDOS legend above DOS axes; if user gave --pdos-legend-bbox, honor it.
+            ncol_p = min(max(1, int(len(ax_dos.get_lines()))), 4)
+            anchor = pdos_legend_bbox if pdos_legend_bbox is not None else (0.5, 1.02)
+            ax_dos.legend(
+                **pdos_kwargs,
+                bbox_to_anchor=anchor,
+                bbox_transform=ax_dos.transAxes,
+                ncol=ncol_p,
+            )
+        else:
+            if pdos_legend_bbox is None:
+                ax_dos.legend(**pdos_kwargs)
+            else:
+                ax_dos.legend(
+                    **pdos_kwargs,
+                    bbox_to_anchor=pdos_legend_bbox,
+                    bbox_transform=ax_dos.transAxes,
+                )
+
+    if args.bold_fonts:
+        _set_figure_text_weight(fig, "bold")
 
     # Tight layout and save
     any_above = bool(args.legend_above) or bool(args.system_above) or bool(args.pdos_legend_above)

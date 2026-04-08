@@ -9,6 +9,8 @@ from typing import List, Optional, Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
+from matplotlib.ticker import MultipleLocator
+from matplotlib.text import Text
 
 
 def _apply_scienceplots_prb_style() -> None:
@@ -77,6 +79,13 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    p.add_argument(
+        "--legend-alpha",
+        type=float,
+        default=None,
+        help="If set, draw the legend with a white semi-transparent frame (0..1).",
+    )
+
     # Global system annotation (QE-style): a separate legend used to indicate what system/material this figure refers to.
     p.add_argument(
         "--system",
@@ -113,6 +122,13 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    p.add_argument(
+        "--system-alpha",
+        type=float,
+        default=None,
+        help="If set, draw the system annotation with a white semi-transparent frame (0..1).",
+    )
+
     # Backward-compatible alias:
     p.add_argument(
         "--label",
@@ -143,6 +159,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--xlim", default=None, help='x limits "xmin,xmax"')
     p.add_argument("--ylim", default=None, help='y limits "ymin,ymax"')
 
+    p.add_argument(
+        "--xtick-step",
+        type=float,
+        default=None,
+        help="Major tick step for x-axis (Frequency, THz). Example: --xtick-step 1.",
+    )
+    p.add_argument(
+        "--ytick-step",
+        type=float,
+        default=None,
+        help="Major tick step for y-axis (Scattering rate). Example: --ytick-step 0.1.",
+    )
+
     p.add_argument("--xlabel", default="Frequency (THz)", help="x-axis label")
     p.add_argument("--ylabel", default=r"Scattering Rate (ps$^{-1}$)", help="y-axis label")
 
@@ -157,6 +186,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     p.add_argument(
+        "--fontsize",
+        type=float,
+        default=None,
+        help=(
+            "Global default font size (rcParams). Does not override explicit per-item sizes like "
+            "--label-fontsize/--legend-fontsize/--system-fontsize."
+        ),
+    )
+
+    p.add_argument(
+        "--bold-fonts",
+        action="store_true",
+        help="Force all text in the figure to bold (including for --style prb).",
+    )
+
+    p.add_argument(
         "--style",
         choices=["prb", "default"],
         default="prb",
@@ -168,6 +213,48 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default="scattering.png", help="Output image path")
     p.add_argument("--show", action="store_true", help="Show interactively")
     return p
+
+
+def _apply_global_fontsize(fontsize: Optional[float]) -> None:
+    if fontsize is None:
+        return
+    fs = float(fontsize)
+    if fs <= 0:
+        raise SystemExit("--fontsize must be > 0")
+    plt.rcParams.update(
+        {
+            "font.size": fs,
+            "axes.titlesize": fs,
+            "axes.labelsize": fs,
+            "xtick.labelsize": fs,
+            "ytick.labelsize": fs,
+            "legend.fontsize": fs,
+        }
+    )
+
+
+def _set_figure_text_weight(fig, weight: str) -> None:
+    for t in fig.findobj(Text):
+        try:
+            t.set_fontweight(weight)
+        except Exception:
+            pass
+
+
+def _apply_legend_frame(leg, *, alpha: float) -> None:
+    if leg is None:
+        return
+    a = float(alpha)
+    if not (0.0 <= a <= 1.0):
+        raise SystemExit("legend alpha must be in [0, 1]")
+    leg.set_frame_on(True)
+    frame = leg.get_frame()
+    frame.set_facecolor("white")
+    frame.set_alpha(a)
+    try:
+        frame.set_edgecolor("0.6")
+    except Exception:
+        pass
 
 
 def _parse_lim(s: Optional[str]) -> Optional[Tuple[float, float]]:
@@ -243,6 +330,15 @@ def main() -> None:
 
     if args.style == "prb":
         _apply_scienceplots_prb_style()
+
+    _apply_global_fontsize(args.fontsize)
+
+    want_bold_fonts = bool(args.bold_fonts)
+    if want_bold_fonts:
+        plt.rcParams["font.weight"] = "bold"
+        plt.rcParams["axes.labelweight"] = "bold"
+        if args.style == "default":
+            plt.rcParams["axes.linewidth"] = 2
 
     xlim = _parse_lim(args.xlim)
     ylim = _parse_lim(args.ylim)
@@ -344,6 +440,19 @@ def main() -> None:
     if ylim:
         ax.set_ylim(*ylim)
 
+    if args.xtick_step is not None:
+        step = float(args.xtick_step)
+        if step <= 0:
+            raise SystemExit("--xtick-step must be > 0")
+        ax.xaxis.set_major_locator(MultipleLocator(step))
+
+    if args.ytick_step is not None:
+        step = float(args.ytick_step)
+        if step <= 0:
+            raise SystemExit("--ytick-step must be > 0")
+        if not args.ylog:
+            ax.yaxis.set_major_locator(MultipleLocator(step))
+
     if args.grid:
         ax.grid(True, linestyle="--", alpha=0.3)
 
@@ -366,11 +475,14 @@ def main() -> None:
 
     leg_main = None
     if handles_leg:
+        legend_loc = str(args.legend_loc)
+        if (legend_bbox is not None) and (legend_loc.strip().lower() == "best"):
+            legend_loc = "upper left"
         kwargs = dict(
             handles=handles_leg,
-            loc=str(args.legend_loc),
-            frameon=False,
-            borderaxespad=0.2,
+            loc=legend_loc,
+            frameon=bool(args.legend_alpha is not None),
+            borderaxespad=(0.0 if legend_bbox is not None else 0.2),
             handlelength=0.8,
             handletextpad=0.35,
             labelspacing=0.35,
@@ -385,6 +497,12 @@ def main() -> None:
                 bbox_to_anchor=legend_bbox,
                 bbox_transform=ax.transAxes,
             )
+
+        if args.legend_alpha is not None:
+            _apply_legend_frame(leg_main, alpha=float(args.legend_alpha))
+        if want_bold_fonts and leg_main is not None:
+            for t in leg_main.get_texts():
+                t.set_fontweight("bold")
 
     # Global system annotation legend (pure text)
     if system_label is not None and str(system_label).strip():
@@ -401,15 +519,19 @@ def main() -> None:
         if leg_main is not None:
             ax.add_artist(leg_main)
 
+        sys_kwargs = {
+            "frameon": bool(args.system_alpha is not None),
+            "handlelength": 0,
+            "handletextpad": 0.0,
+            "borderaxespad": 0.2,
+            "fontsize": fs,
+        }
+
         if system_bbox is None:
             leg_sys = ax.legend(
                 handles=[h],
                 loc=str(args.system_loc),
-                frameon=False,
-                handlelength=0,
-                handletextpad=0.0,
-                borderaxespad=0.2,
-                fontsize=fs,
+                **sys_kwargs,
             )
         else:
             leg_sys = ax.legend(
@@ -417,15 +539,25 @@ def main() -> None:
                 loc=str(args.system_loc),
                 bbox_to_anchor=system_bbox,
                 bbox_transform=ax.transAxes,
-                frameon=False,
-                handlelength=0,
-                handletextpad=0.0,
-                borderaxespad=0.2,
-                fontsize=fs,
+                **sys_kwargs,
             )
+        if args.system_alpha is not None:
+            _apply_legend_frame(leg_sys, alpha=float(args.system_alpha))
         if leg_sys is not None:
             for t in leg_sys.get_texts():
-                t.set_fontweight("bold")
+                if want_bold_fonts:
+                    t.set_fontweight("bold")
+                try:
+                    t.set_ha("center")
+                except Exception:
+                    pass
+            try:
+                leg_sys._legend_box.align = "center"  # noqa: SLF001
+            except Exception:
+                pass
+
+    if want_bold_fonts:
+        _set_figure_text_weight(fig, "bold")
 
     fig.tight_layout()
     fig.savefig(str(args.out), dpi=300)

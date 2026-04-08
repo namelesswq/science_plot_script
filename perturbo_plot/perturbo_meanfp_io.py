@@ -68,6 +68,81 @@ def apply_default_bold_rcparams() -> None:
         return
 
 
+def apply_global_fontsize(fontsize: Optional[float]) -> None:
+    """Apply global/default font sizes without overriding explicit per-item sizes."""
+
+    if fontsize is None:
+        return
+    fs = float(fontsize)
+    if fs <= 0:
+        raise SystemExit("--fontsize must be > 0")
+
+    try:
+        import matplotlib.pyplot as plt
+
+        plt.rcParams.update(
+            {
+                "font.size": fs,
+                "axes.labelsize": fs,
+                "axes.titlesize": fs,
+                "xtick.labelsize": fs,
+                "ytick.labelsize": fs,
+                "legend.fontsize": fs,
+                "figure.titlesize": fs,
+            }
+        )
+    except Exception:
+        return
+
+
+def apply_tick_steps(ax, *, xtick_step: Optional[float] = None, ytick_step: Optional[float] = None, ylog: bool = False) -> None:
+    """Apply major tick spacing on x/y axes via MultipleLocator.
+
+    - When ylog=True, ytick_step is ignored.
+    """
+
+    try:
+        from matplotlib.ticker import MultipleLocator
+    except Exception:
+        return
+
+    if xtick_step is not None:
+        step = float(xtick_step)
+        if step <= 0:
+            raise SystemExit("--xtick-step must be > 0")
+        try:
+            ax.xaxis.set_major_locator(MultipleLocator(step))
+        except Exception:
+            pass
+
+    if (not ylog) and (ytick_step is not None):
+        step = float(ytick_step)
+        if step <= 0:
+            raise SystemExit("--ytick-step must be > 0")
+        try:
+            ax.yaxis.set_major_locator(MultipleLocator(step))
+        except Exception:
+            pass
+
+
+def apply_legend_frame(legend, *, alpha: Optional[float] = None, edgecolor: str = "0.85") -> None:
+    """Enable a white legend frame with optional alpha."""
+
+    if legend is None or alpha is None:
+        return
+    a = float(alpha)
+    if a < 0 or a > 1:
+        raise SystemExit("legend alpha must be in [0, 1]")
+    try:
+        legend.set_frame_on(True)
+        frame = legend.get_frame()
+        frame.set_facecolor("white")
+        frame.set_edgecolor(edgecolor)
+        frame.set_alpha(a)
+    except Exception:
+        return
+
+
 def format_label(label: str, mode: str) -> str:
     """Format a label as chemical formula (subscripts) or raw text.
 
@@ -144,6 +219,14 @@ def apply_plot_style(
     - sci_y: 'auto'|'on'|'off' to show a ×10^n factor on y-axis.
       (Ignored when ylog=True.)
     """
+
+    if legend is not None:
+        try:
+            # Reduce the spacing between the legend handle (marker/line) and the text.
+            # Matplotlib's default is often a bit wide for small PRB-style figures.
+            legend.handletextpad = 0.4
+        except Exception:
+            pass
 
     if label_fontsize is not None:
         fs = float(label_fontsize)

@@ -10,6 +10,9 @@ from matplotlib.lines import Line2D
 
 from perturbo_meanfp_io import (
     apply_default_bold_rcparams,
+    apply_global_fontsize,
+    apply_tick_steps,
+    apply_legend_frame,
     apply_plot_style,
     apply_scienceplots_prb_style,
     broadcast_list,
@@ -322,6 +325,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Font size for x/y axis labels (applies to all axes). If omitted, keep the default.",
     )
+
+    p.add_argument("--no-bold", action="store_true", help="Disable bold text in the figure")
+    p.add_argument("--bold-fonts", action="store_true", help="Force bold text across the whole figure")
+    p.add_argument(
+        "--fontsize",
+        type=float,
+        default=None,
+        help="Global/default font size (rcParams). Does not override explicit per-item sizes.",
+    )
     p.add_argument(
         "--right-axis-spacing",
         type=float,
@@ -354,6 +366,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional legend anchor (bbox_to_anchor) in axes coordinates 'x,y'.",
     )
+    p.add_argument(
+        "--legend-alpha",
+        type=float,
+        default=None,
+        help="Optional alpha (0..1) for the main legend background frame.",
+    )
 
     p.add_argument(
         "--system",
@@ -382,6 +400,23 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional system anchor (bbox_to_anchor) in axes coordinates 'x,y'.",
     )
+    p.add_argument(
+        "--system-alpha",
+        type=float,
+        default=None,
+        help="Optional alpha (0..1) for the system label background frame.",
+    )
+
+    p.add_argument("--xtick-step", type=float, default=None, help="Major tick step on x-axis")
+    p.add_argument(
+        "--ytick-step",
+        type=float,
+        default=None,
+        help="Major tick step on y-axis (applies to all three y-axes unless overridden).",
+    )
+    p.add_argument("--ytick-step-sigma", type=float, default=None, help="Major tick step on σ y-axis")
+    p.add_argument("--ytick-step-kappa", type=float, default=None, help="Major tick step on κ y-axis")
+    p.add_argument("--ytick-step-lorenz", type=float, default=None, help="Major tick step on Lorenz y-axis")
 
     p.add_argument("--xlim", default=None, help='x limits "xmin,xmax" in K')
     p.add_argument(
@@ -421,8 +456,19 @@ def main() -> None:
 
     if args.style == "prb":
         apply_scienceplots_prb_style()
-    else:
-        apply_default_bold_rcparams()
+
+    apply_global_fontsize(args.fontsize)
+
+    want_bold = bool(args.bold_fonts) or ((args.style != "prb") and (not args.no_bold))
+    if want_bold:
+        try:
+            import matplotlib as mpl
+
+            mpl.rcParams.update({"font.weight": "bold", "axes.labelweight": "bold", "axes.titleweight": "bold"})
+        except Exception:
+            pass
+        if args.style != "prb":
+            apply_default_bold_rcparams()
 
     n_files = len(args.files)
 
@@ -527,6 +573,14 @@ def main() -> None:
             else:
                 lorenz.append(float(kk) / (float(ss) * float(tt)))
 
+        sigma_leg = f"{ds_label} $\\boldsymbol{{\\sigma}}$" if want_bold else f"{ds_label} $\\sigma$"
+        kappa_leg = (
+            f"{ds_label} $\\boldsymbol{{\\kappa}}_{{\\mathrm{{el}}}}$"
+            if want_bold
+            else f"{ds_label} $\\kappa_{{el}}$"
+        )
+        lorenz_leg = f"{ds_label} $\\boldsymbol{{L}}$" if want_bold else f"{ds_label} $L$"
+
         ax_sigma.plot(
             t,
             sigma,
@@ -536,7 +590,7 @@ def main() -> None:
             marker=marker,
             markersize=float(marker_sizes[i]),
             markeredgewidth=0.0,
-            label=f"{ds_label} $\\sigma$",
+            label=sigma_leg,
         )
         ax_kappa.plot(
             t,
@@ -547,7 +601,7 @@ def main() -> None:
             marker=marker,
             markersize=float(marker_sizes[i]),
             markeredgewidth=0.0,
-            label=f"{ds_label} $\\kappa_{{el}}$",
+            label=kappa_leg,
         )
         ax_lorenz.plot(
             t,
@@ -558,25 +612,41 @@ def main() -> None:
             marker=marker,
             markersize=float(marker_sizes[i]),
             markeredgewidth=0.0,
-            label=f"{ds_label} $L$",
+            label=lorenz_leg,
         )
 
     # Theoretical (Sommerfeld) Lorenz number reference line
     # Use the same color as L(T) curves to avoid introducing new colors.
     L0 = 2.44e-8  # WΩ/K^2
+    theory_leg = r"Theory $\boldsymbol{L}_{0}$" if want_bold else r"Theory $L_0$"
     ax_lorenz.axhline(
         L0,
         color="gray",
         linestyle="--",
         lw=float(args.lw) * 0.9,
         alpha=0.8,
-        label=r"Theory $L_0$",
+        label=theory_leg,
     )
 
     ax_sigma.set_xlabel("Temperature (K)")
-    ax_sigma.set_ylabel(r"Electrical conductivity $\sigma$ (S/m)")
-    ax_kappa.set_ylabel(r"Thermal conductivity $\kappa_{el}$ (W/mK)")
-    ax_lorenz.set_ylabel(r"Lorenz number $L=\kappa/(\sigma T)$ (W$\Omega$/K$^2$)")
+    if want_bold:
+        ax_sigma.set_ylabel(r"Electrical conductivity $\boldsymbol{\sigma}$ (S/m)")
+        ax_kappa.set_ylabel(r"Thermal conductivity $\boldsymbol{\kappa}_{\mathrm{el}}$ (W/mK)")
+        ax_lorenz.set_ylabel(
+            r"Lorenz number $L=\boldsymbol{\kappa}/(\boldsymbol{\sigma}\,T)$ (W$\Omega$/K$^2$)"
+        )
+    else:
+        ax_sigma.set_ylabel(r"Electrical conductivity $\sigma$ (S/m)")
+        ax_kappa.set_ylabel(r"Thermal conductivity $\kappa_{el}$ (W/mK)")
+        ax_lorenz.set_ylabel(r"Lorenz number $L=\kappa/(\sigma T)$ (W$\Omega$/K$^2$)")
+
+    ystep_sigma = args.ytick_step_sigma if args.ytick_step_sigma is not None else args.ytick_step
+    ystep_kappa = args.ytick_step_kappa if args.ytick_step_kappa is not None else args.ytick_step
+    ystep_lorenz = args.ytick_step_lorenz if args.ytick_step_lorenz is not None else args.ytick_step
+
+    apply_tick_steps(ax_sigma, xtick_step=args.xtick_step, ytick_step=ystep_sigma, ylog=False)
+    apply_tick_steps(ax_kappa, xtick_step=args.xtick_step, ytick_step=ystep_kappa, ylog=False)
+    apply_tick_steps(ax_lorenz, xtick_step=args.xtick_step, ytick_step=ystep_lorenz, ylog=False)
 
     if xlim:
         ax_sigma.set_xlim(*xlim)
@@ -602,30 +672,50 @@ def main() -> None:
         handles.extend(h)
         labels.extend(l)
 
+    legend_loc = str(args.legend_loc)
+    if legend_bbox is not None and legend_loc.strip().lower() == "best":
+        legend_loc = "upper left"
+
+    legend_frameon = args.legend_alpha is not None
+    # Important: ax_kappa/ax_lorenz are twin axes created after ax_sigma, so they
+    # are drawn on top of ax_sigma. Attach the combined legend to the topmost
+    # axes (ax_lorenz) and bump zorder so it won't be covered by curves.
+    legend_ax = ax_lorenz
+
     if legend_bbox is None:
-        leg = ax_sigma.legend(
+        leg = legend_ax.legend(
             handles,
             labels,
-            loc=str(args.legend_loc),
-            frameon=False,
+            loc=legend_loc,
+            frameon=legend_frameon,
             ncols=int(args.legend_ncol),
             fontsize=args.legend_fontsize,
+            handletextpad=0.4,
+            handlelength=1.2,
         )
     else:
-        leg = ax_sigma.legend(
+        leg = legend_ax.legend(
             handles,
             labels,
-            loc=str(args.legend_loc),
+            loc=legend_loc,
             bbox_to_anchor=legend_bbox,
-            bbox_transform=ax_sigma.transAxes,
-            frameon=False,
+            bbox_transform=legend_ax.transAxes,
+            frameon=legend_frameon,
             ncols=int(args.legend_ncol),
             fontsize=args.legend_fontsize,
+            handletextpad=0.4,
+            handlelength=1.2,
+            borderaxespad=0.0,
         )
+    apply_legend_frame(leg, alpha=args.legend_alpha)
+    try:
+        leg.set_zorder(1000)
+    except Exception:
+        pass
 
     # Global system annotation (pure text)
     if args.system is not None and str(args.system).strip():
-        ax_sigma.add_artist(leg)
+        legend_ax.add_artist(leg)
         sys_lab = format_label(str(args.system), str(args.system_format))
         handle = Line2D([0], [0], color="none", lw=0, label=sys_lab)
         fs = args.system_fontsize
@@ -635,31 +725,45 @@ def main() -> None:
             except Exception:
                 fs = None
 
+        system_loc = str(args.system_loc)
+        if system_bbox is not None and system_loc.strip().lower() == "best":
+            system_loc = "upper left"
+
+        system_frameon = args.system_alpha is not None
         if system_bbox is None:
-            leg_sys = ax_sigma.legend(
+            leg_sys = legend_ax.legend(
                 handles=[handle],
-                loc=str(args.system_loc),
-                frameon=False,
+                loc=system_loc,
+                frameon=system_frameon,
                 fontsize=fs,
                 handlelength=0,
+                handletextpad=0.0,
             )
         else:
-            leg_sys = ax_sigma.legend(
+            leg_sys = legend_ax.legend(
                 handles=[handle],
-                loc=str(args.system_loc),
+                loc=system_loc,
                 bbox_to_anchor=system_bbox,
-                bbox_transform=ax_sigma.transAxes,
-                frameon=False,
+                bbox_transform=legend_ax.transAxes,
+                frameon=system_frameon,
                 fontsize=fs,
                 handlelength=0,
+                handletextpad=0.0,
+                borderaxespad=0.0,
             )
+        apply_legend_frame(leg_sys, alpha=args.system_alpha)
+        try:
+            if leg_sys is not None:
+                leg_sys.set_zorder(1001)
+        except Exception:
+            pass
         if leg_sys is not None:
             for t in leg_sys.get_texts():
                 t.set_fontweight("bold")
 
-    apply_plot_style(ax_sigma, legend=leg, bold=(args.style != "prb"), sci_y="auto", ylog=False)
-    apply_plot_style(ax_kappa, legend=None, bold=(args.style != "prb"), sci_y="auto", ylog=False)
-    apply_plot_style(ax_lorenz, legend=None, bold=(args.style != "prb"), sci_y="auto", ylog=False)
+    apply_plot_style(ax_sigma, legend=None, bold=want_bold, sci_y="auto", ylog=False)
+    apply_plot_style(ax_kappa, legend=None, bold=want_bold, sci_y="auto", ylog=False)
+    apply_plot_style(ax_lorenz, legend=leg, bold=want_bold, sci_y="auto", ylog=False)
 
     if args.label_fontsize is not None:
         fs = float(args.label_fontsize)
@@ -685,11 +789,12 @@ def main() -> None:
     ax_lorenz.text(
         lorenz_spine_x,
         1.01,
-        r"$\times 10^{-8}$",
+        (r"$\boldsymbol{\times}\ 10^{\mathbf{-8}}$" if want_bold else r"$\times 10^{-8}$"),
         transform=ax_lorenz.transAxes,
         ha="left",
         va="bottom",
         fontsize=(float(args.label_fontsize) if args.label_fontsize is not None else ax_lorenz.yaxis.label.get_size()),
+        fontweight=("bold" if want_bold else "normal"),
     )
 
     # Reserve extra right margin for the 3rd (offset) y-axis.

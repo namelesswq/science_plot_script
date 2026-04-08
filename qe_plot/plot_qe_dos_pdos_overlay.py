@@ -11,6 +11,57 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
+from matplotlib.ticker import MultipleLocator
+from matplotlib.text import Text
+
+
+def _apply_global_fontsize(fontsize: Optional[float]) -> None:
+    """Apply global default font sizes via rcParams.
+
+    This intentionally does NOT override explicit per-component sizes set later
+    (e.g. --label-fontsize, --legend-fontsize, --system-fontsize).
+    """
+
+    if fontsize is None:
+        return
+    fs = float(fontsize)
+    if fs <= 0:
+        raise SystemExit("--fontsize must be > 0")
+
+    plt.rcParams.update(
+        {
+            "font.size": fs,
+            "axes.titlesize": fs,
+            "axes.labelsize": fs,
+            "xtick.labelsize": fs,
+            "ytick.labelsize": fs,
+            "legend.fontsize": fs,
+        }
+    )
+
+
+def _set_figure_text_weight(fig, weight: str) -> None:
+    for t in fig.findobj(Text):
+        try:
+            t.set_fontweight(weight)
+        except Exception:
+            pass
+
+
+def _apply_legend_frame(leg, *, alpha: float) -> None:
+    if leg is None:
+        return
+    a = float(alpha)
+    if not (0.0 <= a <= 1.0):
+        raise SystemExit("legend alpha must be in [0, 1]")
+    leg.set_frame_on(True)
+    frame = leg.get_frame()
+    frame.set_facecolor("white")
+    frame.set_alpha(a)
+    try:
+        frame.set_edgecolor("0.6")
+    except Exception:
+        pass
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -43,6 +94,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Glob pattern for PDOS files (overrides auto). Example: 'zr2sc.pdos.pdos_atm#*'",
     )
 
+    
     # Dataset legend (colored lines)
     p.add_argument(
         "--legend",
@@ -52,6 +104,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Legend label(s) for each dataset (each --tot). Provide one per dataset, or a single value to broadcast. "
             "If omitted, uses the total DOS filename stem."
         ),
+    
     )
     p.add_argument(
         "--legend-format",
@@ -70,6 +123,17 @@ def _build_parser() -> argparse.ArgumentParser:
         default="upper left",
         help="Legend location (matplotlib legend loc). Default: upper left.",
     )
+
+    p.add_argument(
+        "--legend-alpha",
+        type=float,
+        default=None,
+        help=(
+            "If set, draw the curve legend with a white semi-transparent background (0..1). "
+            "Helps avoid lines obscuring legend text."
+        ),
+    )
+    
     p.add_argument(
         "--legend-bbox",
         default=None,
@@ -77,6 +141,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Optional legend anchor (bbox_to_anchor) in axes coordinates 'x,y'. "
             "If provided, legend placement uses both --legend-loc and this anchor."
         ),
+    
     )
 
     p.add_argument(
@@ -92,6 +157,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Special tokens: 'no-tot' disables plotting total DOS; 'tot' forces plotting total DOS. "
             "If provided but empty/blank, the script plots per-element summed PDOS (no orbital-resolved curves)."
         ),
+    
     )
 
     p.add_argument(
@@ -105,6 +171,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--figsize",
         default=None,
         help='Figure size "width,height" in inches. Overrides the preset size from --style (e.g. "3.4,2.6").',
+    )
+
+    p.add_argument(
+        "--fontsize",
+        type=float,
+        default=None,
+        help=(
+            "Global default font size (rcParams). Does not override explicit per-item sizes like "
+            "--label-fontsize/--legend-fontsize/--system-fontsize."
+        ),
     )
 
     p.add_argument(
@@ -129,6 +205,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help='x limits "xmin,xmax" in eV (energy axis is whatever is in the files; often E-Ef).',
     )
     p.add_argument("--ylim", default=None, help='y limits "ymin,ymax"')
+
+    p.add_argument(
+        "--xtick-step",
+        type=float,
+        default=None,
+        help="Major tick step for x-axis (energy) in eV. Example: --xtick-step 2.",
+    )
+    p.add_argument(
+        "--ytick-step",
+        type=float,
+        default=None,
+        help="Major tick step for y-axis (DOS). Example: --ytick-step 1.",
+    )
 
     p.add_argument(
         "--fermi-line",
@@ -158,6 +247,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--ylog", action="store_true", help="Use log scale on y-axis")
     p.add_argument("--no-bold", action="store_true", help="Disable bold text in the figure")
+    p.add_argument(
+        "--bold-fonts",
+        action="store_true",
+        help="Force all text in the figure to bold (including for --style prb).",
+    )
     p.add_argument(
         "--label-fontsize",
         type=float,
@@ -268,6 +362,17 @@ def _build_parser() -> argparse.ArgumentParser:
         default="upper left",
         help="Legend location for --system (matplotlib legend loc). Default: upper left.",
     )
+
+    p.add_argument(
+        "--system-alpha",
+        type=float,
+        default=None,
+        help=(
+            "If set, draw the --system legend with a white semi-transparent background (0..1). "
+            "Helps avoid lines obscuring the system label."
+        ),
+    )
+    
     p.add_argument(
         "--system-bbox",
         default=None,
@@ -275,10 +380,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "Optional legend anchor (bbox_to_anchor) in axes coordinates 'x,y' (e.g. '1.02,1.0' for outside right). "
             "If provided, legend placement uses both --system-loc and this anchor."
         ),
+    
     )
     p.add_argument("--out", default="dos_pdos_overlay.png", help="Output image path")
     p.add_argument("--show", action="store_true", help="Show interactively")
 
+    
     return p
 
 
@@ -288,6 +395,7 @@ def _parse_lim(s: Optional[str]) -> Optional[Tuple[float, float]]:
     a, b = s.split(",", 1)
     return float(a), float(b)
 
+    
 
 def _parse_figsize(s: Optional[str]) -> Optional[Tuple[float, float]]:
     if not s:
@@ -526,7 +634,7 @@ def _orbital_component_count(orb: str) -> Optional[int]:
     return None
 
 
-def _orbital_component_label(orb: str, comp_idx: int) -> str:
+def _orbital_component_label(orb: str, comp_idx: int, *, bold: bool = False) -> str:
     """Human-friendly label for an orbital component (1-based).
 
     For d, use conventional real-orbital names in the user-preferred order.
@@ -536,17 +644,29 @@ def _orbital_component_label(orb: str, comp_idx: int) -> str:
     k = int(comp_idx)
     if o == "p":
         # Conventional real-orbital labeling.
-        names = [r"$p_{x}$", r"$p_{y}$", r"$p_{z}$"]
+        if bold:
+            names = [r"$\mathbf{p_{x}}$", r"$\mathbf{p_{y}}$", r"$\mathbf{p_{z}}$"]
+        else:
+            names = [r"$p_{x}$", r"$p_{y}$", r"$p_{z}$"]
         if 1 <= k <= len(names):
             return names[k - 1]
     if o == "d":
-        names = [
-            r"$d_{xz}$",
-            r"$d_{yz}$",
-            r"$d_{xy}$",
-            r"$d_{x^2-y^2}$",
-            r"$d_{z^2}$",
-        ]
+        if bold:
+            names = [
+                r"$\mathbf{d_{xz}}$",
+                r"$\mathbf{d_{yz}}$",
+                r"$\mathbf{d_{xy}}$",
+                r"$\mathbf{d_{x^2-y^2}}$",
+                r"$\mathbf{d_{z^2}}$",
+            ]
+        else:
+            names = [
+                r"$d_{xz}$",
+                r"$d_{yz}$",
+                r"$d_{xy}$",
+                r"$d_{x^2-y^2}$",
+                r"$d_{z^2}$",
+            ]
         if 1 <= k <= len(names):
             return names[k - 1]
     return f"{o}[{k}]"
@@ -907,6 +1027,9 @@ def _choose_linestyle(
 def main() -> None:
     args = _build_parser().parse_args()
 
+    if args.bold_fonts and args.no_bold:
+        raise SystemExit("Do not use --bold-fonts together with --no-bold")
+
     pdos_components_all, pdos_components_map = _parse_pdos_components(args.pdos_components)
     linestyle_rules = _parse_linestyle_rules(args.linestyle)
     linewidth_rules = _parse_linewidth_rules(args.linewidth)
@@ -997,25 +1120,25 @@ def main() -> None:
     if n_cases > 1:
         print(f"Detected {n_cases} datasets. Total DOS and PDOS are plotted for comparison.")
 
-    # Plot
     if args.style == "prb":
         # One-click PRB-ish formatting from SciencePlots.
         _apply_scienceplots_prb_style()
-        if figsize_override is not None:
-            fig, ax = plt.subplots(figsize=figsize_override)
-        else:
-            fig, ax = plt.subplots()
-    else:
-        if figsize_override is not None:
-            fig, ax = plt.subplots(figsize=figsize_override)
-        else:
-            fig, ax = plt.subplots()
 
-    # optional bold text (legacy behavior)
-    if (args.style != "prb") and (not args.no_bold):
+    # Apply global defaults after selecting the base style.
+    _apply_global_fontsize(args.fontsize)
+
+    # Bold selection: keep legacy behavior for non-prb, but allow forcing bold for prb.
+    want_bold_fonts = bool(args.bold_fonts) or ((args.style != "prb") and (not args.no_bold))
+    if want_bold_fonts:
         plt.rcParams["font.weight"] = "bold"
         plt.rcParams["axes.labelweight"] = "bold"
-        plt.rcParams["axes.linewidth"] = 2
+        if args.style != "prb":
+            plt.rcParams["axes.linewidth"] = 2
+
+    if figsize_override is not None:
+        fig, ax = plt.subplots(figsize=figsize_override)
+    else:
+        fig, ax = plt.subplots()
 
     # Colors
     case_colors = [
@@ -1313,7 +1436,7 @@ def main() -> None:
                     if int(comp_idx) == 0:
                         lab0 = f"{el}-{orb}"
                     else:
-                        lab0 = f"{el}-{_orbital_component_label(str(orb), int(comp_idx))}"
+                        lab0 = f"{el}-{_orbital_component_label(str(orb), int(comp_idx), bold=want_bold_fonts)}"
                 else:
                     el, wfc_idx, orb, comp_idx = key  # type: ignore[misc]
                     y = groups_wfc[(el, int(wfc_idx), orb, int(comp_idx))]
@@ -1324,9 +1447,9 @@ def main() -> None:
                         # Preserve any n0-based prefix when available (e.g. 'Zr-4d' -> 'Zr-4$d_{xz}$').
                         if str(base).endswith(str(orb)):
                             prefix = str(base)[: -len(str(orb))]
-                            lab0 = f"{prefix}{_orbital_component_label(str(orb), int(comp_idx))}"
+                            lab0 = f"{prefix}{_orbital_component_label(str(orb), int(comp_idx), bold=want_bold_fonts)}"
                         else:
-                            lab0 = f"{el}-{int(wfc_idx)}{_orbital_component_label(str(orb), int(comp_idx))}"
+                            lab0 = f"{el}-{int(wfc_idx)}{_orbital_component_label(str(orb), int(comp_idx), bold=want_bold_fonts)}"
 
                 if next_pdos_color >= len(pdos_palette):
                     raise SystemExit(
@@ -1367,7 +1490,10 @@ def main() -> None:
         ax.axvline(0.0, color="gray", linestyle="--", lw=1.2, alpha=0.8)
 
     if any(f is not None for f in fermis):
-        ax.set_xlabel(r"$E-E_{f}$ (eV)")
+        if want_bold_fonts:
+            ax.set_xlabel(r"$\mathbf{E-E_{f}}$ (eV)")
+        else:
+            ax.set_xlabel(r"$E-E_{f}$ (eV)")
     else:
         ax.set_xlabel("Energy (eV)")
     ax.set_ylabel("DOS (states/eV/unit cell)")
@@ -1391,15 +1517,34 @@ def main() -> None:
     if ylim:
         ax.set_ylim(*ylim)
 
+    if args.xtick_step is not None:
+        step = float(args.xtick_step)
+        if step <= 0:
+            raise SystemExit("--xtick-step must be > 0")
+        ax.xaxis.set_major_locator(MultipleLocator(step))
+
+    if args.ytick_step is not None:
+        step = float(args.ytick_step)
+        if step <= 0:
+            raise SystemExit("--ytick-step must be > 0")
+        if not args.ylog:
+            ax.yaxis.set_major_locator(MultipleLocator(step))
+
     # Curve legend (orbitals; can be large)
-    legend_kwargs = {"frameon": False, "ncols": 2}
+    legend_kwargs = {"frameon": bool(args.legend_alpha is not None), "ncols": 2, "loc": str(args.legend_loc)}
     if args.legend_fontsize is not None:
         legend_kwargs["fontsize"] = float(args.legend_fontsize)
+
+    if legend_bbox is not None:
+        legend_kwargs["bbox_to_anchor"] = legend_bbox
+        legend_kwargs["bbox_transform"] = ax.transAxes
 
     if args.style != "prb":
         ax.grid(True, alpha=0.25)
 
     leg_curve = ax.legend(**legend_kwargs)
+    if args.legend_alpha is not None:
+        _apply_legend_frame(leg_curve, alpha=float(args.legend_alpha))
 
     # Note: we intentionally do NOT add a separate dataset legend here.
     # PDOS/TOT curve legend already uses "<legend>:<series>" labels.
@@ -1419,29 +1564,51 @@ def main() -> None:
         if leg_curve is not None:
             ax.add_artist(leg_curve)
 
+        sys_frame = bool(args.system_alpha is not None)
+        sys_kwargs = {
+            "frameon": sys_frame,
+            "fontsize": fs,
+            "handlelength": 0,
+            "handletextpad": 0,
+        }
         if system_bbox is None:
-            leg_sys = ax.legend(handles=[handle], loc=str(args.system_loc), frameon=False, fontsize=fs, handlelength=0)
+            leg_sys = ax.legend(
+                handles=[handle],
+                loc=str(args.system_loc),
+                **sys_kwargs,
+            )
         else:
             leg_sys = ax.legend(
                 handles=[handle],
                 loc=str(args.system_loc),
                 bbox_to_anchor=system_bbox,
                 bbox_transform=ax.transAxes,
-                frameon=False,
-                fontsize=fs,
-                handlelength=0,
+                **sys_kwargs,
             )
+        if args.system_alpha is not None:
+            _apply_legend_frame(leg_sys, alpha=float(args.system_alpha))
         if leg_sys is not None:
             for t in leg_sys.get_texts():
-                t.set_fontweight("bold")
+                try:
+                    t.set_ha("center")
+                except Exception:
+                    pass
+            # Best-effort centering of the legend box contents.
+            try:
+                leg_sys._legend_box.align = "center"  # noqa: SLF001
+            except Exception:
+                pass
 
     _apply_style(
         ax,
         legend=leg_curve,
-        bold=(not args.no_bold) and (args.style != "prb"),
+        bold=want_bold_fonts,
         sci_y=args.sci_y,
         ylog=args.ylog,
     )
+
+    if want_bold_fonts:
+        _set_figure_text_weight(fig, "bold")
 
     fig.tight_layout()
     fig.savefig(args.out, dpi=300)

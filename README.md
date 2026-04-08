@@ -142,6 +142,7 @@ python qe_plot/plot_qe_dos_pdos_overlay.py \
 - `--pdos-components`：选择并绘制指定轨道的分量（m-components），如 `p=all;d=1,3,5`
 - `--pdos-components-only`：配合 `--pdos-components` 使用，只画分量，不画该轨道的总和（ldos）
 - `--legend`：每组数据的前缀标签（支持 1 个值广播到所有体系，或给 N 个值对应 N 组）
+- `--legend-loc` / `--legend-bbox x,y`：曲线图例位置（`bbox` 使用轴坐标 0~1，可用负值/大于 1 放到图外）
 - `--norm`：对每组 DOS/PDOS 的 y 值做归一化（除以 `norm`；同样支持广播/逐组）
 - `--style prb|default`、`--figsize 3.4,2.6`、`--ylog`、`--sci-y auto|on|off`
 - `--label-fontsize`：x/y 轴标签字号
