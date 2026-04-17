@@ -217,6 +217,31 @@ def _parse_xy(s: Optional[str]) -> Optional[Tuple[float, float]]:
     return float(a), float(b)
 
 
+def _broadcast_str_list(xs: list[str], n: int, name: str) -> list[str]:
+    if n <= 0:
+        return []
+    if len(xs) == n:
+        return list(xs)
+    if len(xs) == 1:
+        return [str(xs[0])] * n
+    raise SystemExit(f"{name} expects 1 value or {n} values, but got {len(xs)}")
+
+
+def _normalize_linestyle_token(s: str) -> str:
+    t = str(s).strip().lower()
+    aliases = {
+        "solid": "-",
+        "dash": "--",
+        "dashed": "--",
+        "dashdash": "--",
+        "dot": ":",
+        "dotted": ":",
+        "dashdot": "-.",
+        "dash-dot": "-.",
+    }
+    return aliases.get(t, str(s))
+
+
 def _extend_to_xlim(x: np.ndarray, y: np.ndarray, *, xlim: Optional[Tuple[float, float]]) -> Tuple[np.ndarray, np.ndarray]:
     if x.size < 1:
         return x, y
@@ -273,7 +298,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # ShengBTE (lattice)
-    p.add_argument("--latt-file", required=True, help="Path to ShengBTE BTE.cumulative_kappa_tensor")
+    p.add_argument(
+        "--latt-file",
+        required=True,
+        nargs="+",
+        help="One or more ShengBTE BTE.cumulative_kappa_tensor files to overlay.",
+    )
     p.add_argument(
         "--latt-component",
         default="avg",
@@ -292,7 +322,12 @@ def build_parser() -> argparse.ArgumentParser:
         ],
         help="Lattice tensor component to plot. Default: avg.",
     )
-    p.add_argument("--latt-label", default="latt", help="Legend label for lattice curve.")
+    p.add_argument(
+        "--latt-label",
+        default=["latt"],
+        nargs="+",
+        help="Legend label(s) for lattice curve(s). Provide 1 (broadcast) or Nlatt values.",
+    )
 
     # Perturbo (electronic)
     p.add_argument("--el-meanfp", required=True, help="Path to Perturbo *_meanfp.yml")
@@ -342,9 +377,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--figsize", default=None, help='Figure size "width,height" in inches (e.g. "7.5,5")')
     p.add_argument("--lw", type=float, default=2.2, help="Line width")
-    p.add_argument("--ls-latt", default="-", help="Line style for lattice curve")
+    p.add_argument(
+        "--ls-latt",
+        default=["solid"],
+        nargs="+",
+        help=(
+            "Line style(s) for lattice curve(s). Provide 1 (broadcast) or Nlatt values. "
+            "Recommended: 'solid', 'dashed', 'dotted', 'dashdot'. "
+            "If you really want raw tokens like '-' or '-.', pass them with '=' to avoid argparse confusion: "
+            "--ls-latt=- --ls-latt=-."
+        ),
+    )
     p.add_argument("--ls-el", default="--", help="Line style for electronic curve")
-    p.add_argument("--color-latt", default=None, help="Color for lattice curve")
+    p.add_argument(
+        "--color-latt",
+        default=None,
+        nargs="+",
+        help="Color(s) for lattice curve(s). Provide 1 (broadcast) or Nlatt values.",
+    )
     p.add_argument("--color-el", default=None, help="Color for electronic curve")
 
     p.add_argument(
@@ -364,6 +414,37 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["chem", "raw"],
         default="raw",
         help="Render legend labels with subscripts (chem) or raw text (raw). Default: raw.",
+    )
+
+    p.add_argument(
+        "--legend-handlelength",
+        type=float,
+        default=1.4,
+        help="Legend line length (handlelength). Default: 1.4.",
+    )
+    p.add_argument(
+        "--legend-handletextpad",
+        type=float,
+        default=0.4,
+        help="Spacing between legend line and text (handletextpad). Default: 0.4.",
+    )
+    p.add_argument(
+        "--legend-labelspacing",
+        type=float,
+        default=0.25,
+        help="Vertical spacing between legend entries (labelspacing). Default: 0.25.",
+    )
+    p.add_argument(
+        "--legend-borderpad",
+        type=float,
+        default=0.3,
+        help="Legend internal padding (borderpad). Default: 0.3.",
+    )
+    p.add_argument(
+        "--legend-borderaxespad",
+        type=float,
+        default=0.2,
+        help="Legend padding from axes (borderaxespad). Default: 0.2.",
     )
     p.add_argument("--legend-bbox", default=None, help="Optional legend bbox_to_anchor in axes coords 'x,y'.")
     p.add_argument("--legend-alpha", type=float, default=None, help="Legend frame alpha (0..1).")
@@ -526,9 +607,28 @@ def main() -> None:
     ylim = tuple(args.ylim) if args.ylim is not None else None
 
     # --- lattice (ShengBTE)
-    mfp_latt, k9 = _read_cumulative_kappa_vs_mfp_tensor(str(args.latt_file))
-    y_latt = _select_component(k9, str(args.latt_component))
-    x_latt, y_latt = _extend_to_xlim(np.asarray(mfp_latt, float), np.asarray(y_latt, float), xlim=xlim)
+    latt_files = [str(x) for x in (args.latt_file or [])]
+    if not latt_files:
+        raise SystemExit("--latt-file cannot be empty")
+
+    latt_labels_in = [str(x) for x in (args.latt_label or [])]
+    latt_labels_in = _broadcast_str_list(latt_labels_in, len(latt_files), "--latt-label")
+
+    latt_colors_in: Optional[list[str]] = None
+    if args.color_latt is not None:
+        latt_colors_in = _broadcast_str_list([str(x) for x in args.color_latt], len(latt_files), "--color-latt")
+
+    latt_ls_in = [_normalize_linestyle_token(str(x)) for x in (args.ls_latt or [])]
+    latt_ls_in = _broadcast_str_list(latt_ls_in, len(latt_files), "--ls-latt")
+
+    x_latt_list: list[np.ndarray] = []
+    y_latt_list: list[np.ndarray] = []
+    for f in latt_files:
+        mfp_latt, k9 = _read_cumulative_kappa_vs_mfp_tensor(f)
+        y_latt = _select_component(k9, str(args.latt_component))
+        x_latt, y_latt = _extend_to_xlim(np.asarray(mfp_latt, float), np.asarray(y_latt, float), xlim=xlim)
+        x_latt_list.append(x_latt)
+        y_latt_list.append(y_latt)
 
     # --- electronic (Perturbo)
     meanfp_data = load_meanfp_yaml(str(args.el_meanfp))
@@ -566,25 +666,32 @@ def main() -> None:
     figsize = _parse_figsize(args.figsize)
     fig, ax = plt.subplots(figsize=(7.5, 5), dpi=150) if figsize is None else plt.subplots(figsize=figsize, dpi=150)
 
-    lab_latt = _format_chem_label(str(args.latt_label), str(args.legend_format))
     lab_el = _format_chem_label(str(args.el_label), str(args.legend_format))
-
-    lab_latt = _normalize_math_label(lab_latt, bold=want_bold_fonts)
     lab_el = _normalize_math_label(lab_el, bold=want_bold_fonts)
-
-    kw_latt = dict(label=lab_latt, lw=float(args.lw), linestyle=str(args.ls_latt))
-    if args.color_latt:
-        kw_latt["color"] = str(args.color_latt)
 
     kw_el = dict(label=lab_el, lw=float(args.lw), linestyle=str(args.ls_el))
     if args.color_el:
         kw_el["color"] = str(args.color_el)
 
-    (line_latt,) = ax.plot(x_latt, y_latt, **kw_latt)
+    handles = []
+    x_line_list = []
+    y_line_list = []
+
+    for i, (x_latt, y_latt) in enumerate(zip(x_latt_list, y_latt_list)):
+        lab_latt_i = _format_chem_label(str(latt_labels_in[i]), str(args.legend_format))
+        lab_latt_i = _normalize_math_label(lab_latt_i, bold=want_bold_fonts)
+        kw_latt_i = dict(label=lab_latt_i, lw=float(args.lw), linestyle=str(latt_ls_in[i]))
+        if latt_colors_in is not None:
+            kw_latt_i["color"] = str(latt_colors_in[i])
+        (line_latt_i,) = ax.plot(x_latt, y_latt, **kw_latt_i)
+        handles.append(line_latt_i)
+        x_line_list.append(x_latt)
+        y_line_list.append(y_latt)
+
     (line_el,) = ax.plot(x_el, y_el, **kw_el)
-    handles = [line_latt, line_el]
-    x_line_list = [x_latt, x_el]
-    y_line_list = [y_latt, y_el]
+    handles.append(line_el)
+    x_line_list.append(x_el)
+    y_line_list.append(y_el)
 
     ax.set_xlabel(str(args.xlabel))
     ax.set_ylabel(str(args.ylabel))
@@ -646,7 +753,20 @@ def main() -> None:
     legend_bbox = _parse_xy(args.legend_bbox)
     legend_loc = " ".join(args.legend_loc) if isinstance(args.legend_loc, list) else str(args.legend_loc)
 
-    leg_kw = dict(loc=legend_loc, frameon=bool(args.legend_alpha is not None))
+    # Matplotlib's loc='best' can effectively ignore/defeat bbox_to_anchor intent.
+    # If user provides --legend-bbox, switch to a deterministic loc.
+    if legend_bbox is not None and legend_loc.strip().lower() == "best":
+        legend_loc = "upper left"
+
+    leg_kw = dict(
+        loc=legend_loc,
+        frameon=bool(args.legend_alpha is not None),
+        handlelength=float(args.legend_handlelength),
+        handletextpad=float(args.legend_handletextpad),
+        labelspacing=float(args.legend_labelspacing),
+        borderpad=float(args.legend_borderpad),
+        borderaxespad=float(args.legend_borderaxespad),
+    )
     if args.legend_fontsize is not None:
         fs = float(args.legend_fontsize)
         if fs <= 0:
