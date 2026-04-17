@@ -51,6 +51,55 @@ def _normalize_linestyle_token(s: str) -> str:
     }
     return aliases.get(t, str(s))
 
+def _component_subscript_tex(comp: str, *, bold: bool) -> str:
+    """Return mathtext fragment for tensor-component subscript.
+
+    - in-plane  -> \\parallel
+    - out-of-plane -> \\bot
+    - avg -> avg
+    - xx/yy/zz/... -> xx/yy/zz/... (typeset via \\mathrm or \\mathbf)
+    """
+
+    c = str(comp).strip().lower()
+    if c in {"in-plane", "in_plane", "inplane", "ip"}:
+        return r"\boldsymbol{\parallel}" if bold else r"\parallel"
+    if c in {"out-of-plane", "out_of_plane", "outofplane", "oop"}:
+        return r"\boldsymbol{\bot}" if bold else r"\bot"
+
+    tag = "avg" if c == "avg" else c
+    if bold:
+        return rf"\mathbf{{{tag}}}"
+    return rf"\mathrm{{{tag}}}"
+
+
+def _legend_sym_with_comp(sym: str, comp: str, *, bold: bool) -> str:
+    sub = _component_subscript_tex(comp, bold=bold)
+    if bold:
+        return rf"$\boldsymbol{{{sym}}}_{{{sub}}}$"
+    return rf"${sym}_{{{sub}}}$"
+
+
+def _legend_kappa_el_with_comp(comp: str, *, bold: bool) -> str:
+    sub = _component_subscript_tex(comp, bold=bold)
+    # Keep 'el' upright; don't try to bold it.
+    if bold:
+        return rf"$\boldsymbol{{\kappa}}_{{\mathbf{{el}},{sub}}}$"
+    return rf"$\kappa_{{\mathrm{{el}},{sub}}}$"
+
+
+def _linestyle_rank(ls: str) -> int:
+    """Z-order rank by linestyle: solid < dashed < dotted."""
+
+    norm = _normalize_linestyle_token(str(ls))
+    if norm == "-":
+        return 1
+    if norm == "--":
+        return 2
+    if norm == ":":
+        return 3
+    # Default: treat other styles similar to dashed.
+    return 2
+
 
 def _broadcast_float_list(xs: Sequence[float], n: int, name: str) -> List[float]:
     if len(xs) == n:
@@ -93,6 +142,29 @@ def _get_component_series(
     tol: float = 1e-6,
 ) -> Series:
     comp = component.lower()
+
+    # Aliases / derived components
+    if comp in {"out-of-plane", "out_of_plane", "outofplane", "oop"}:
+        comp = "zz"
+
+    if comp in {"in-plane", "in_plane", "inplane", "ip"}:
+        for c in ("xx", "yy"):
+            if c not in series_by_comp:
+                raise SystemExit(
+                    f"Component {c} required for in-plane in {series_label}, but not found. Available: {sorted(series_by_comp.keys())}"
+                )
+        sxx = series_by_comp["xx"]
+        syy = series_by_comp["yy"]
+        _assert_same_temperature_grid(
+            sxx.temperatures,
+            syy.temperatures,
+            tol=tol,
+            a_label=f"{series_label} xx",
+            b_label=f"{series_label} yy",
+        )
+        temps = list(sxx.temperatures)
+        vals = [(a + b) / 2.0 for a, b in zip(sxx.values, syy.values)]
+        return Series(temps, vals)
     if comp != "avg":
         if comp not in series_by_comp:
             raise SystemExit(
@@ -214,6 +286,85 @@ def _require_lim_order(lim: Optional[Tuple[float, float]], name: str) -> None:
         raise SystemExit(f"{name} expects ymin<ymax, but got {lo},{hi}")
 
 
+def _pad_legend_columns_preserve_order(
+    handles: Sequence[object],
+    labels: Sequence[str],
+    *,
+    ncol: int,
+    column_real_counts: Optional[Sequence[int]] = None,
+) -> Tuple[List[object], List[str]]:
+    """Pad legend entries so right columns can have more rows, without reordering.
+
+    Matplotlib assigns legend entries to columns in order (column-major):
+    first chunk -> 1st column, second chunk -> 2nd column, ...
+
+    To make the *right* column(s) have more real entries while keeping the
+    original entry order, we insert invisible placeholders at the end of the
+    earlier (shorter) columns.
+    """
+
+    if len(handles) != len(labels):
+        raise ValueError("Legend handles/labels length mismatch")
+
+    k = int(ncol)
+    if k <= 1:
+        return list(handles), list(labels)
+
+    n_items = len(handles)
+    if n_items == 0:
+        return [], []
+
+    if column_real_counts is None:
+        base = n_items // k
+        rem = n_items % k
+        # Put the remainder into the RIGHTMOST columns.
+        counts = [base] * k
+        for j in range(k - rem, k):
+            if 0 <= j < k:
+                counts[j] += 1
+    else:
+        counts = [int(x) for x in column_real_counts]
+        if len(counts) != k:
+            raise SystemExit(
+                f"--legend-column-counts expects {k} integers (same as --legend-ncol), but got {len(counts)}"
+            )
+        if any(c < 0 for c in counts):
+            raise SystemExit("--legend-column-counts values must be >= 0")
+        if sum(counts) < n_items:
+            counts[-1] += (n_items - sum(counts))
+
+    rows = max(counts) if counts else 0
+    if rows <= 0:
+        return list(handles), list(labels)
+
+    blank_handle = Line2D([0], [0], color="none", lw=0)
+    blank_label = " "
+
+    out_handles: List[object] = []
+    out_labels: List[str] = []
+    idx = 0
+    for c in counts:
+        take = min(int(c), n_items - idx)
+        for _ in range(take):
+            out_handles.append(handles[idx])
+            out_labels.append(labels[idx])
+            idx += 1
+        # Fill the rest of this column to a uniform height.
+        for _ in range(rows - int(c)):
+            out_handles.append(blank_handle)
+            out_labels.append(blank_label)
+
+    # If the user passed very large counts (sum > n_items), the remainder are already blanks.
+    # If counts were computed automatically, idx must consume all items.
+    if idx != n_items:
+        # Shouldn't happen, but avoid dropping items silently.
+        for j in range(idx, n_items):
+            out_handles.append(handles[j])
+            out_labels.append(labels[j])
+
+    return out_handles, out_labels
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
@@ -253,8 +404,60 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--component",
         default="avg",
-        choices=["xx", "yy", "zz", "xy", "xz", "yz", "yx", "zx", "zy", "avg"],
-        help="Tensor component to plot [default: avg]. Use 'avg' for (xx+yy+zz)/3.",
+        choices=[
+            "xx",
+            "yy",
+            "zz",
+            "xy",
+            "xz",
+            "yz",
+            "yx",
+            "zx",
+            "zy",
+            "avg",
+            "in-plane",
+            "out-of-plane",
+        ],
+        help=(
+            "Tensor component to plot [default: avg]. "
+            "Use 'avg' for (xx+yy+zz)/3, 'in-plane' for (xx+yy)/2, 'out-of-plane' for zz."
+        ),
+    )
+
+    p.add_argument(
+        "--components",
+        default=None,
+        nargs="+",
+        choices=[
+            "xx",
+            "yy",
+            "zz",
+            "xy",
+            "xz",
+            "yz",
+            "yx",
+            "zx",
+            "zy",
+            "avg",
+            "in-plane",
+            "out-of-plane",
+        ],
+        help=(
+            "Plot multiple tensor components on the same figure (overrides --component). "
+            "Examples: --components xx yy avg  |  --components in-plane out-of-plane avg."
+        ),
+    )
+
+    p.add_argument(
+        "--plot",
+        nargs="+",
+        default=None,
+        choices=["sigma", "kappa", "lorenz"],
+        help=(
+            "Select which quantities to plot. Any subset of: sigma kappa lorenz. "
+            "Examples: --plot sigma  |  --plot kappa lorenz  |  --plot sigma kappa lorenz. "
+            "If omitted, plots all three."
+        ),
     )
 
     p.add_argument(
@@ -262,8 +465,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         nargs="+",
         help=(
-            "Line/marker color(s) for each input file. Provide one per file, or a single value to broadcast. "
-            "Examples: 'black', 'tab:red', '#1f77b4'."
+            "Per-file color(s). Provide one per file, or a single value to broadcast. "
+            "Note: only allowed when plotting a single quantity via --plot (e.g. --plot sigma), "
+            "otherwise colors are controlled by --color-sigma/--color-kappa/--color-lorenz."
         ),
     )
 
@@ -314,6 +518,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Marker size(s) for each input file. Provide one per file, or a single value to broadcast. "
             "Default: 4.5."
+        ),
+    )
+
+    p.add_argument(
+        "--ls",
+        default=None,
+        nargs="+",
+        help=(
+            "Per-file linestyle(s). Provide one per file, or a single value to broadcast. "
+            "Examples: '-', ':', '-.', 'dashed'. Note: do not pass a bare '--' token; use 'dashed'."
         ),
     )
 
@@ -371,6 +585,47 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Optional alpha (0..1) for the main legend background frame.",
+    )
+    p.add_argument(
+        "--legend-handlelength",
+        type=float,
+        default=2.6,
+        help="Legend handle length (longer helps distinguish dashed vs dotted) [default: 2.6].",
+    )
+    p.add_argument(
+        "--legend-handletextpad",
+        type=float,
+        default=0.4,
+        help="Legend handle/text gap [default: 0.4].",
+    )
+    p.add_argument(
+        "--legend-columnspacing",
+        type=float,
+        default=0.8,
+        help="Legend column spacing (only relevant when --legend-ncol > 1) [default: 0.8].",
+    )
+
+    p.add_argument(
+        "--legend-labelspacing",
+        type=float,
+        default=None,
+        help=(
+            "Legend row spacing (vertical spacing between entries). "
+            "If omitted, uses matplotlib default. Typical tighter values: 0.2~0.4."
+        ),
+    )
+
+    p.add_argument(
+        "--legend-column-counts",
+        default=None,
+        nargs="+",
+        type=int,
+        help=(
+            "Optional custom number of legend entries per column (left to right). "
+            "Length must equal --legend-ncol. If the sum is smaller than the number of legend entries, "
+            "the remainder is added to the last column. Shorter columns are padded with invisible blanks. "
+            "Example (2 columns): --legend-ncol 2 --legend-column-counts 4 6"
+        ),
     )
 
     p.add_argument(
@@ -472,6 +727,18 @@ def main() -> None:
 
     n_files = len(args.files)
 
+    plot_set = {"sigma", "kappa", "lorenz"} if args.plot is None else {str(x).strip().lower() for x in args.plot}
+    plot_set.discard("")
+    unknown = sorted([x for x in plot_set if x not in {"sigma", "kappa", "lorenz"}])
+    if unknown:
+        raise SystemExit(f"Unknown --plot values: {unknown}. Choices: sigma kappa lorenz")
+    if not plot_set:
+        raise SystemExit("--plot expects at least one of: sigma kappa lorenz")
+    want_sigma = "sigma" in plot_set
+    want_kappa = "kappa" in plot_set
+    want_lorenz = "lorenz" in plot_set
+    n_qty = int(want_sigma) + int(want_kappa) + int(want_lorenz)
+
     if args.legend_ncol <= 0:
         raise SystemExit("--legend-ncol must be >= 1")
 
@@ -482,11 +749,28 @@ def main() -> None:
         legends_raw = [default_label(f) for f in args.files]
     legends = [format_label(str(x), str(args.legend_format)) for x in legends_raw]
 
-    if args.color is not None:
-        raise SystemExit(
-            "--color (per-file colors) is deprecated for this script now. "
-            "Use --color-sigma/--color-kappa/--color-lorenz to set colors per variable."
-        )
+    # Component selection (single or multiple)
+    comps_in = flatten_tokens(args.components)
+    if comps_in:
+        components = [str(c).strip().lower() for c in comps_in if str(c).strip()]
+    else:
+        components = [str(args.component).strip().lower()]
+    for c in components:
+        if c not in {
+            "xx",
+            "yy",
+            "zz",
+            "xy",
+            "xz",
+            "yz",
+            "yx",
+            "zx",
+            "zy",
+            "avg",
+            "in-plane",
+            "out-of-plane",
+        }:
+            raise SystemExit(f"Unknown component {c!r} in --components")
 
     default_markers = ["o", "s", "^", "D", "v", ">", "<", "p", "h", "x", "+", "*"]
 
@@ -507,6 +791,26 @@ def main() -> None:
     if any(m <= 0 for m in marker_sizes):
         raise SystemExit("--ms must be > 0")
 
+    ls_in = flatten_tokens(args.ls)
+    if ls_in:
+        ls_by_file_raw = broadcast_list(ls_in, n_files, "--ls")
+        ls_by_file = [_normalize_linestyle_token(str(x)) for x in ls_by_file_raw]
+    else:
+        ls_by_file = None
+
+    colors_in = flatten_tokens(args.color)
+    if colors_in:
+        colors_by_file = broadcast_list(colors_in, n_files, "--color")
+    else:
+        colors_by_file = None
+
+    if colors_by_file is not None:
+        if n_qty != 1:
+            raise SystemExit(
+                "--color (per-file colors) is only supported when plotting a single quantity. "
+                "Use --plot sigma (or kappa/lorenz) together with --color, or use --color-sigma/--color-kappa/--color-lorenz."
+            )
+
     xlim = _parse_lim(args.xlim)
     ylim_sigma = _parse_lim(args.ylim_sigma)
     ylim_kappa = _parse_lim(args.ylim_kappa)
@@ -520,18 +824,46 @@ def main() -> None:
     system_bbox = parse_xy(args.system_bbox)
 
     if figsize_override is None:
-        fig, ax_sigma = plt.subplots(figsize=(7.2, 4.6), dpi=150)
+        fig, ax_left = plt.subplots(figsize=(7.2, 4.6), dpi=150)
     else:
-        fig, ax_sigma = plt.subplots(figsize=figsize_override, dpi=150)
+        fig, ax_left = plt.subplots(figsize=figsize_override, dpi=150)
 
-    ax_kappa = ax_sigma.twinx()
-    ax_lorenz = ax_sigma.twinx()
-    lorenz_spine_x = 1.0 + float(args.right_axis_spacing)
-    ax_lorenz.spines["right"].set_position(("axes", lorenz_spine_x))
-    ax_lorenz.set_frame_on(True)
-    ax_lorenz.patch.set_visible(False)
+    # Decide which variable lives on which axis.
+    # For 1 variable: use single left axis.
+    # For 2 variables: use left + one right (twinx).
+    # For 3 variables: use left + right + offset right (as before).
+    ax_sigma = None
+    ax_kappa = None
+    ax_lorenz = None
 
-    comp = str(args.component).lower()
+    requested = [q for q in ("sigma", "kappa", "lorenz") if q in plot_set]
+    left_var = requested[0]
+    right_var = requested[1] if len(requested) >= 2 else None
+    third_var = requested[2] if len(requested) >= 3 else None
+
+    var_to_ax = {left_var: ax_left}
+    ax_right = None
+    ax_third = None
+    if right_var is not None:
+        ax_right = ax_left.twinx()
+        var_to_ax[right_var] = ax_right
+    lorenz_spine_x = 1.0
+    if third_var is not None:
+        ax_third = ax_left.twinx()
+        lorenz_spine_x = 1.0 + float(args.right_axis_spacing)
+        ax_third.spines["right"].set_position(("axes", lorenz_spine_x))
+        ax_third.set_frame_on(True)
+        ax_third.patch.set_visible(False)
+        var_to_ax[third_var] = ax_third
+
+    ax_sigma = var_to_ax.get("sigma")
+    ax_kappa = var_to_ax.get("kappa")
+    ax_lorenz = var_to_ax.get("lorenz")
+
+    # When plotting multiple components, use different linestyles per component
+    # to keep them visually distinguishable.
+    comp_ls_cycle = ["-", "--", ":", "-."]
+    comp_to_ls = {c: comp_ls_cycle[i % len(comp_ls_cycle)] for i, c in enumerate(components)}
 
     # Use different linestyles for different quantities.
     # Keep per-file color/marker consistent.
@@ -551,136 +883,190 @@ def main() -> None:
         sigma_by_comp = read_perturbo_trans_ita_tensor_vs_t(path, "conductivity")
         kappa_by_comp = read_perturbo_trans_ita_tensor_vs_t(path, "thermal conductivity")
 
-        sigma_s = _get_component_series(sigma_by_comp, comp, series_label=f"{ds_label} conductivity")
-        kappa_s = _get_component_series(kappa_by_comp, comp, series_label=f"{ds_label} thermal conductivity")
+        per_file_color = None if colors_by_file is None else str(colors_by_file[i])
 
-        _assert_same_temperature_grid(
-            sigma_s.temperatures,
-            kappa_s.temperatures,
-            tol=1e-6,
-            a_label=f"{ds_label} sigma",
-            b_label=f"{ds_label} kappa",
-        )
+        for comp in components:
+            sigma_s = _get_component_series(sigma_by_comp, comp, series_label=f"{ds_label} conductivity")
+            kappa_s = _get_component_series(kappa_by_comp, comp, series_label=f"{ds_label} thermal conductivity")
 
-        t = sigma_s.temperatures
-        sigma = sigma_s.values
-        kappa = kappa_s.values
+            _assert_same_temperature_grid(
+                sigma_s.temperatures,
+                kappa_s.temperatures,
+                tol=1e-6,
+                a_label=f"{ds_label} sigma",
+                b_label=f"{ds_label} kappa",
+            )
 
-        lorenz: List[float] = []
-        for tt, ss, kk in zip(t, sigma, kappa):
-            if float(ss) == 0.0:
-                lorenz.append(float("nan"))
-            else:
-                lorenz.append(float(kk) / (float(ss) * float(tt)))
+            t = sigma_s.temperatures
+            sigma = sigma_s.values
+            kappa = kappa_s.values
 
-        sigma_leg = f"{ds_label} $\\boldsymbol{{\\sigma}}$" if want_bold else f"{ds_label} $\\sigma$"
-        kappa_leg = (
-            f"{ds_label} $\\boldsymbol{{\\kappa}}_{{\\mathrm{{el}}}}$"
-            if want_bold
-            else f"{ds_label} $\\kappa_{{el}}$"
-        )
-        lorenz_leg = f"{ds_label} $\\boldsymbol{{L}}$" if want_bold else f"{ds_label} $L$"
+            lorenz: List[float] = []
+            for tt, ss, kk in zip(t, sigma, kappa):
+                if float(ss) == 0.0:
+                    lorenz.append(float("nan"))
+                else:
+                    lorenz.append(float(kk) / (float(ss) * float(tt)))
 
-        ax_sigma.plot(
-            t,
-            sigma,
-            color=c_sigma,
-            lw=float(args.lw),
-            linestyle=ls_sigma,
-            marker=marker,
-            markersize=float(marker_sizes[i]),
-            markeredgewidth=0.0,
-            label=sigma_leg,
-        )
-        ax_kappa.plot(
-            t,
-            kappa,
-            color=c_kappa,
-            lw=float(args.lw),
-            linestyle=ls_kappa,
-            marker=marker,
-            markersize=float(marker_sizes[i]),
-            markeredgewidth=0.0,
-            label=kappa_leg,
-        )
-        ax_lorenz.plot(
-            t,
-            lorenz,
-            color=c_lorenz,
-            lw=float(args.lw),
-            linestyle=ls_lorenz,
-            marker=marker,
-            markersize=float(marker_sizes[i]),
-            markeredgewidth=0.0,
-            label=lorenz_leg,
-        )
+            # Legend: encode tensor component as a math subscript, e.g. σ_xx, κ_el,xx, L_xx;
+            # in-plane/out-of-plane are shown as ∥/⊥.
+            sigma_sym = _legend_sym_with_comp("\\sigma", comp, bold=want_bold)
+            kappa_sym = _legend_kappa_el_with_comp(comp, bold=want_bold)
+            lorenz_sym = _legend_sym_with_comp("L", comp, bold=want_bold)
+
+            sigma_leg = f"{ds_label} {sigma_sym}"
+            kappa_leg = f"{ds_label} {kappa_sym}"
+            lorenz_leg = f"{ds_label} {lorenz_sym}"
+
+            comp_ls = comp_to_ls.get(comp, "-")
+            per_file_ls = None if ls_by_file is None else str(ls_by_file[i])
+
+            if want_sigma and ax_sigma is not None:
+                use_ls = comp_ls if len(components) > 1 else (per_file_ls if per_file_ls is not None else ls_sigma)
+                use_color = per_file_color if per_file_color is not None else c_sigma
+                z = 100 * _linestyle_rank(use_ls) + i
+                ax_sigma.plot(
+                    t,
+                    sigma,
+                    color=use_color,
+                    lw=float(args.lw),
+                    linestyle=use_ls,
+                    marker=marker,
+                    markersize=float(marker_sizes[i]),
+                    markeredgewidth=0.0,
+                    label=sigma_leg,
+                    zorder=z,
+                )
+            if want_kappa and ax_kappa is not None:
+                use_ls = comp_ls if len(components) > 1 else (per_file_ls if per_file_ls is not None else ls_kappa)
+                use_color = per_file_color if per_file_color is not None else c_kappa
+                z = 100 * _linestyle_rank(use_ls) + i
+                ax_kappa.plot(
+                    t,
+                    kappa,
+                    color=use_color,
+                    lw=float(args.lw),
+                    linestyle=use_ls,
+                    marker=marker,
+                    markersize=float(marker_sizes[i]),
+                    markeredgewidth=0.0,
+                    label=kappa_leg,
+                    zorder=z,
+                )
+            if want_lorenz and ax_lorenz is not None:
+                use_ls = comp_ls if len(components) > 1 else (per_file_ls if per_file_ls is not None else ls_lorenz)
+                use_color = per_file_color if per_file_color is not None else c_lorenz
+                z = 100 * _linestyle_rank(use_ls) + i
+                ax_lorenz.plot(
+                    t,
+                    lorenz,
+                    color=use_color,
+                    lw=float(args.lw),
+                    linestyle=use_ls,
+                    marker=marker,
+                    markersize=float(marker_sizes[i]),
+                    markeredgewidth=0.0,
+                    label=lorenz_leg,
+                    zorder=z,
+                )
 
     # Theoretical (Sommerfeld) Lorenz number reference line
     # Use the same color as L(T) curves to avoid introducing new colors.
-    L0 = 2.44e-8  # WΩ/K^2
-    theory_leg = r"Theory $\boldsymbol{L}_{0}$" if want_bold else r"Theory $L_0$"
-    ax_lorenz.axhline(
-        L0,
-        color="gray",
-        linestyle="--",
-        lw=float(args.lw) * 0.9,
-        alpha=0.8,
-        label=theory_leg,
-    )
-
-    ax_sigma.set_xlabel("Temperature (K)")
-    if want_bold:
-        ax_sigma.set_ylabel(r"Electrical conductivity $\boldsymbol{\sigma}$ (S/m)")
-        ax_kappa.set_ylabel(r"Thermal conductivity $\boldsymbol{\kappa}_{\mathrm{el}}$ (W/mK)")
-        ax_lorenz.set_ylabel(
-            r"Lorenz number $L=\boldsymbol{\kappa}/(\boldsymbol{\sigma}\,T)$ (W$\Omega$/K$^2$)"
+    if want_lorenz and ax_lorenz is not None:
+        L0 = 2.44e-8  # WΩ/K^2
+        theory_leg = r"Theory $\boldsymbol{L}_{0}$" if want_bold else r"Theory $L_0$"
+        ax_lorenz.axhline(
+            L0,
+            color="gray",
+            linestyle="--",
+            lw=float(args.lw) * 0.9,
+            alpha=0.8,
+            label=theory_leg,
         )
-    else:
-        ax_sigma.set_ylabel(r"Electrical conductivity $\sigma$ (S/m)")
-        ax_kappa.set_ylabel(r"Thermal conductivity $\kappa_{el}$ (W/mK)")
-        ax_lorenz.set_ylabel(r"Lorenz number $L=\kappa/(\sigma T)$ (W$\Omega$/K$^2$)")
+
+    ax_left.set_xlabel("Temperature (K)")
+    if want_sigma and ax_sigma is not None:
+        ax_sigma.set_ylabel(
+            r"Electrical conductivity $\boldsymbol{\sigma}$ (S/m)" if want_bold else r"Electrical conductivity $\sigma$ (S/m)"
+        )
+    if want_kappa and ax_kappa is not None:
+        ax_kappa.set_ylabel(
+            r"Thermal conductivity $\boldsymbol{\kappa}_{\mathbf{el}}$ (W/mK)"
+            if want_bold
+            else r"Thermal conductivity $\kappa_{\mathrm{el}}$ (W/mK)"
+        )
+    if want_lorenz and ax_lorenz is not None:
+        # Keep the formula consistent regardless of axis layout.
+        # In bold mode, mathtext does not automatically bold plain letters like 'T' or unit symbols.
+        # Use \mathbf / \boldsymbol explicitly.
+        ax_lorenz.set_ylabel(
+            (
+                r"Lorenz number $L=\boldsymbol{\kappa}_{\mathbf{el}}/(\boldsymbol{\sigma}\,\mathbf{T})$ "
+                r"($\mathbf{W}\,\boldsymbol{\Omega}/\mathbf{K}^{2}$)"
+            )
+            if want_bold
+            else r"Lorenz number $L=\kappa_{\mathrm{el}}/(\sigma T)$ (W$\Omega$/K$^2$)"
+        )
 
     ystep_sigma = args.ytick_step_sigma if args.ytick_step_sigma is not None else args.ytick_step
     ystep_kappa = args.ytick_step_kappa if args.ytick_step_kappa is not None else args.ytick_step
     ystep_lorenz = args.ytick_step_lorenz if args.ytick_step_lorenz is not None else args.ytick_step
 
-    apply_tick_steps(ax_sigma, xtick_step=args.xtick_step, ytick_step=ystep_sigma, ylog=False)
-    apply_tick_steps(ax_kappa, xtick_step=args.xtick_step, ytick_step=ystep_kappa, ylog=False)
-    apply_tick_steps(ax_lorenz, xtick_step=args.xtick_step, ytick_step=ystep_lorenz, ylog=False)
+    if ax_sigma is not None and want_sigma:
+        apply_tick_steps(ax_sigma, xtick_step=args.xtick_step, ytick_step=ystep_sigma, ylog=False)
+    if ax_kappa is not None and want_kappa:
+        apply_tick_steps(ax_kappa, xtick_step=args.xtick_step, ytick_step=ystep_kappa, ylog=False)
+    if ax_lorenz is not None and want_lorenz:
+        apply_tick_steps(ax_lorenz, xtick_step=args.xtick_step, ytick_step=ystep_lorenz, ylog=False)
 
     if xlim:
-        ax_sigma.set_xlim(*xlim)
+        ax_left.set_xlim(*xlim)
 
     if ylim_sigma:
-        ax_sigma.set_ylim(*ylim_sigma)
+        if ax_sigma is not None and want_sigma:
+            ax_sigma.set_ylim(*ylim_sigma)
     if ylim_kappa:
-        ax_kappa.set_ylim(*ylim_kappa)
+        if ax_kappa is not None and want_kappa:
+            ax_kappa.set_ylim(*ylim_kappa)
     if ylim_lorenz:
-        ax_lorenz.set_ylim(*ylim_lorenz)
+        if ax_lorenz is not None and want_lorenz:
+            ax_lorenz.set_ylim(*ylim_lorenz)
 
     if args.title:
-        ax_sigma.set_title(args.title)
+        ax_left.set_title(args.title)
 
     if args.style != "prb":
-        ax_sigma.grid(True, alpha=0.25)
+        ax_left.grid(True, alpha=0.25)
 
     # One combined legend from all axes.
     handles: List[object] = []
     labels: List[str] = []
     for a in (ax_sigma, ax_kappa, ax_lorenz):
+        if a is None:
+            continue
         h, l = a.get_legend_handles_labels()
-        handles.extend(h)
-        labels.extend(l)
+        if h and l:
+            handles.extend(h)
+            labels.extend(l)
+
+    if int(args.legend_ncol) > 1 and handles:
+        # Default behavior: when the number of items does not divide evenly,
+        # push the extra items into the RIGHTMOST columns (without changing order).
+        # If --legend-column-counts is provided, it controls per-column real counts.
+        handles, labels = _pad_legend_columns_preserve_order(
+            handles,
+            labels,
+            ncol=int(args.legend_ncol),
+            column_real_counts=(args.legend_column_counts if args.legend_column_counts is not None else None),
+        )
 
     legend_loc = str(args.legend_loc)
     if legend_bbox is not None and legend_loc.strip().lower() == "best":
         legend_loc = "upper left"
 
     legend_frameon = args.legend_alpha is not None
-    # Important: ax_kappa/ax_lorenz are twin axes created after ax_sigma, so they
-    # are drawn on top of ax_sigma. Attach the combined legend to the topmost
-    # axes (ax_lorenz) and bump zorder so it won't be covered by curves.
-    legend_ax = ax_lorenz
+    # Attach to the topmost axis (drawn last) so it won't be covered by curves.
+    legend_ax = ax_lorenz if ax_lorenz is not None else (ax_kappa if ax_kappa is not None else ax_left)
 
     if legend_bbox is None:
         leg = legend_ax.legend(
@@ -690,8 +1076,10 @@ def main() -> None:
             frameon=legend_frameon,
             ncols=int(args.legend_ncol),
             fontsize=args.legend_fontsize,
-            handletextpad=0.4,
-            handlelength=1.2,
+            handletextpad=float(args.legend_handletextpad),
+            handlelength=float(args.legend_handlelength),
+            columnspacing=float(args.legend_columnspacing),
+            labelspacing=args.legend_labelspacing,
         )
     else:
         leg = legend_ax.legend(
@@ -703,8 +1091,10 @@ def main() -> None:
             frameon=legend_frameon,
             ncols=int(args.legend_ncol),
             fontsize=args.legend_fontsize,
-            handletextpad=0.4,
-            handlelength=1.2,
+            handletextpad=float(args.legend_handletextpad),
+            handlelength=float(args.legend_handlelength),
+            columnspacing=float(args.legend_columnspacing),
+            labelspacing=args.legend_labelspacing,
             borderaxespad=0.0,
         )
     apply_legend_frame(leg, alpha=args.legend_alpha)
@@ -721,7 +1111,7 @@ def main() -> None:
         fs = args.system_fontsize
         if fs is None:
             try:
-                fs = float(ax_sigma.yaxis.label.get_size()) * 1.15
+                fs = float(ax_left.yaxis.label.get_size()) * 1.15
             except Exception:
                 fs = None
 
@@ -761,15 +1151,18 @@ def main() -> None:
             for t in leg_sys.get_texts():
                 t.set_fontweight("bold")
 
-    apply_plot_style(ax_sigma, legend=None, bold=want_bold, sci_y="auto", ylog=False)
-    apply_plot_style(ax_kappa, legend=None, bold=want_bold, sci_y="auto", ylog=False)
-    apply_plot_style(ax_lorenz, legend=leg, bold=want_bold, sci_y="auto", ylog=False)
+    for a in (ax_left, ax_right, ax_third):
+        if a is None:
+            continue
+        apply_plot_style(a, legend=(leg if a is legend_ax else None), bold=want_bold, sci_y="auto", ylog=False)
 
     if args.label_fontsize is not None:
         fs = float(args.label_fontsize)
         if fs <= 0:
             raise SystemExit("--label-fontsize must be > 0")
-        for a in (ax_sigma, ax_kappa, ax_lorenz):
+        for a in (ax_left, ax_right, ax_third):
+            if a is None:
+                continue
             a.xaxis.label.set_size(fs)
             a.yaxis.label.set_size(fs)
             a.tick_params(axis="both", which="both", labelsize=fs)
@@ -784,21 +1177,35 @@ def main() -> None:
             except Exception:
                 pass
 
-    ax_lorenz.yaxis.get_offset_text().set_visible(False)
+    if want_lorenz and ax_lorenz is not None:
+        # Only add the manual scale annotation when Lorenz is plotted on an offset/twin axis.
+        # For Lorenz-only plots (single left axis), keep Matplotlib's automatic offset text.
+        if n_qty != 1:
+            try:
+                ax_lorenz.yaxis.get_offset_text().set_visible(False)
+            except Exception:
+                pass
 
-    ax_lorenz.text(
-        lorenz_spine_x,
-        1.01,
-        (r"$\boldsymbol{\times}\ 10^{\mathbf{-8}}$" if want_bold else r"$\times 10^{-8}$"),
-        transform=ax_lorenz.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=(float(args.label_fontsize) if args.label_fontsize is not None else ax_lorenz.yaxis.label.get_size()),
-        fontweight=("bold" if want_bold else "normal"),
-    )
+            ax_lorenz.text(
+                lorenz_spine_x,
+                1.01,
+                (r"$\boldsymbol{\times}\ 10^{\mathbf{-8}}$" if want_bold else r"$\times 10^{-8}$"),
+                transform=ax_lorenz.transAxes,
+                ha="left",
+                va="bottom",
+                fontsize=(
+                    float(args.label_fontsize)
+                    if args.label_fontsize is not None
+                    else ax_lorenz.yaxis.label.get_size()
+                ),
+                fontweight=("bold" if want_bold else "normal"),
+            )
 
-    # Reserve extra right margin for the 3rd (offset) y-axis.
-    fig.tight_layout(rect=(0.0, 0.0, 0.86, 1.0))
+    # Reserve extra right margin only when we have the 3rd (offset) y-axis.
+    if ax_third is not None:
+        fig.tight_layout(rect=(0.0, 0.0, 0.86, 1.0))
+    else:
+        fig.tight_layout()
     if args.out:
         fig.savefig(args.out)
     else:
